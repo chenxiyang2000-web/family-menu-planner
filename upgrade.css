@@ -311,6 +311,110 @@ input:focus,select:focus,textarea:focus{outline:2px solid rgba(142,53,43,.28);bo
   .page-head h1{font-size:32px}
   .dish-card:hover{transform:none}
 }
+/* Phone-only density improvements. Tablets keep the desktop card layout. */
+@media(max-width:600px){
+  .dish-grid{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:11px;
+    margin-top:15px;
+  }
+  .dish-grid>.empty{grid-column:1/-1}
+  .dish-card{
+    min-width:0;
+    box-shadow:2px 3px 0 var(--vintage-shadow);
+  }
+  .dish-image{
+    width:100%;
+    min-height:0;
+    aspect-ratio:var(--all-card-image-ratio,3/2);
+    font-size:34px;
+  }
+  .favorite{
+    top:7px;
+    right:7px;
+    width:30px;
+    height:30px;
+  }
+  .dish-body{
+    min-width:0;
+    padding:10px;
+  }
+  .dish-title{
+    display:-webkit-box;
+    overflow:hidden;
+    min-height:2.35em;
+    font-size:17px;
+    line-height:1.18;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:2;
+  }
+  .dish-body>.meta{
+    overflow:hidden;
+    font-size:11px;
+    line-height:1.45;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .tags{
+    gap:3px;
+    margin:7px 0;
+  }
+  .tag{
+    max-width:100%;
+    overflow:hidden;
+    padding:2px 5px;
+    font-size:9px;
+    line-height:1.35;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .dish-foot{
+    min-height:48px;
+    align-items:center;
+    gap:5px;
+    padding:7px 8px;
+  }
+  .dish-foot>span{
+    display:flex;
+    min-width:0;
+    flex-wrap:wrap;
+    gap:2px;
+  }
+  .dish-foot .text-btn{
+    min-height:32px;
+    padding:5px 3px;
+    font-size:11px;
+    line-height:1.15;
+  }
+  .order-dish-heading{
+    align-items:flex-start;
+    flex-direction:column;
+    gap:3px;
+  }
+  .order-dish-heading .dish-title{min-height:0}
+  .order-price{font-size:13px}
+  .order-detail-link{margin-top:5px}
+  .order-card .dish-foot{
+    align-items:stretch;
+    flex-direction:column;
+  }
+  .order-card .dish-foot .btn,
+  .order-card .dish-foot .text-btn{
+    width:100%;
+    min-height:36px;
+  }
+  .order-card .dish-foot .btn{
+    padding:7px 5px;
+    font-size:11px;
+    white-space:normal;
+  }
+}
+@media(max-width:360px){
+  .container{padding-right:3%;padding-left:3%}
+  .dish-grid{gap:8px}
+  .dish-body{padding:8px}
+  .dish-foot{padding:6px}
+}
 @media print{
   body{background:#fff;color:#111}
   body::before{display:none}
