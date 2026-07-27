@@ -1,7 +1,7 @@
 import { load, save, uid, createPlan, categories, meals, healthTags, cuisineOptions, servingOptions } from './storage.js';
 import { currentPlan, dayIndexes, getSlot, slotKey, dishOf, eligible, buildSelectedPlan, generateCompletePlan, replaceDish, shoppingSummary } from './logic.js';
 
-let state=load(), view='library', filter='全部', search='', orderSelection=[], startFolderId=null, startPlanOpen=false;
+let state=await load(), view='library', filter='全部', search='', orderSelection=[], startFolderId=null, startPlanOpen=false;
 let removedLegacyBlanks=false;
 state.plans.forEach(plan=>Object.keys(plan.slots||{}).forEach(key=>{
   const cleaned=(plan.slots[key]||[]).filter(item=>!item.blank);
@@ -30,6 +30,11 @@ const showToast=(message,type='success')=>{
   requestAnimationFrame(()=>toast.classList.add('show'));
   setTimeout(()=>{toast.classList.remove('show');setTimeout(()=>toast.remove(),180)},2200);
 };
+window.addEventListener('family-menu-cloud-status',event=>{
+  if(event.detail?.status==='error'){
+    showToast(event.detail.message||'云端同步失败，修改已暂存在本机。','error');
+  }
+});
 const persist=(message='')=>{if(!save(state)){showToast('保存失败：本地存储空间不足，请删除过大的图片后重试。','error');return false}render();if(message)showToast(message);return true};
 const nextPaint=()=>new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
 async function runBusy(button,label,task){

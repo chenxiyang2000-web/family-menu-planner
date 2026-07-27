@@ -1,5 +1,22 @@
+import {
+  SUPABASE_CONFIG,
+  getSupabaseClient,
+  isSupabaseConfigured
+} from './supabase.js';
+
 const KEY = 'family-menu-planner-v2';
 const LEGACY_KEY = 'family-menu-planner-v1';
+const CLOUD_DIRTY_KEY = 'family-menu-planner-cloud-dirty';
+const CLOUD_TABLE = 'family_menu_state';
+let pendingCloudState = null;
+let cloudFlushPromise = null;
+const withTimeout = (promise, milliseconds = 8000) => Promise.race([
+  promise,
+  new Promise((_, reject) => setTimeout(
+    () => reject(new Error('云端请求超时')),
+    milliseconds
+  ))
+]);
 
 export const categories = ['肉菜', '蔬菜', '主食', '汤饮', '甜品', '超大菜', '其他'];
 export const meals = ['早餐', '午餐', '晚餐'];
@@ -109,29 +126,42 @@ function migrateLegacy(legacy) {
   return state;
 }
 
-export function load() {
+function normalizeState(current) {
+  const fallback = defaultState();
+  const folders = Array.isArray(current?.folders) && current.folders.length
+    ? current.folders
+    : fallback.folders;
+  const plans = (Array.isArray(current?.plans) && current.plans.length
+    ? current.plans
+    : fallback.plans
+  ).map(plan => ({
+    ...plan,
+    budget:Number(plan.budget)||'',
+    cuisines:Array.isArray(plan.cuisines)
+      ? plan.cuisines.filter(x=>cuisineOptions.includes(x))
+      : [],
+    maxSpicy:Math.max(0,Math.min(5,Number(plan.maxSpicy ?? 5))),
+    autoFillMenu:typeof plan.autoFillMenu==='boolean'?plan.autoFillMenu:null,
+    folderId:folders.some(folder=>folder.id===plan.folderId)
+      ? plan.folderId
+      : folders[0].id
+  }));
+  return {
+    ...fallback,
+    ...(current || {}),
+    folders,
+    dishes:(current?.dishes || fallback.dishes).map(migrateDish),
+    plans,
+    currentPlanId:plans.some(p=>p.id===current?.currentPlanId)
+      ? current.currentPlanId
+      : plans[0].id
+  };
+}
+
+function readLocalState() {
   try {
     const current = JSON.parse(localStorage.getItem(KEY));
-    if (current) {
-      const fallback = defaultState();
-      const folders = Array.isArray(current.folders) && current.folders.length ? current.folders : fallback.folders;
-      const plans = (Array.isArray(current.plans) && current.plans.length ? current.plans : fallback.plans)
-        .map(plan => ({
-          ...plan,
-          budget:Number(plan.budget)||'',
-          cuisines:Array.isArray(plan.cuisines)?plan.cuisines.filter(x=>cuisineOptions.includes(x)):[],
-          maxSpicy:Math.max(0,Math.min(5,Number(plan.maxSpicy ?? 5))),
-          autoFillMenu:typeof plan.autoFillMenu==='boolean'?plan.autoFillMenu:null,
-          folderId: folders.some(folder => folder.id === plan.folderId) ? plan.folderId : folders[0].id
-        }));
-      return {
-        ...fallback, ...current,
-        folders,
-        dishes: (current.dishes || fallback.dishes).map(migrateDish),
-        plans,
-        currentPlanId: plans.some(p => p.id === current.currentPlanId) ? current.currentPlanId : plans[0].id
-      };
-    }
+    if (current) return normalizeState(current);
     const legacy = JSON.parse(localStorage.getItem(LEGACY_KEY));
     return legacy ? migrateLegacy(legacy) : defaultState();
   } catch {
@@ -139,7 +169,7 @@ export function load() {
   }
 }
 
-export const save = state => {
+function writeLocalState(state) {
   try {
     localStorage.setItem(KEY, JSON.stringify(state));
     return true;
@@ -147,4 +177,90 @@ export const save = state => {
     console.error('保存本地数据失败', error);
     return false;
   }
+}
+
+function reportCloudStatus(status, message = '') {
+  window.dispatchEvent(new CustomEvent('family-menu-cloud-status', {
+    detail: { status, message }
+  }));
+}
+
+async function uploadCloudState(client, state) {
+  const { error } = await client
+    .from(CLOUD_TABLE)
+    .upsert({
+      id: SUPABASE_CONFIG.familyId,
+      state
+    }, { onConflict: 'id' });
+  if (error) throw error;
+}
+
+function queueCloudSave(state) {
+  if (!isSupabaseConfigured()) return;
+  localStorage.setItem(CLOUD_DIRTY_KEY, '1');
+  pendingCloudState = structuredClone(state);
+  if (cloudFlushPromise) return;
+  cloudFlushPromise = Promise.resolve().then(async () => {
+    try {
+      const client = await withTimeout(getSupabaseClient());
+      while (pendingCloudState && client) {
+        const snapshot = pendingCloudState;
+        pendingCloudState = null;
+        await withTimeout(uploadCloudState(client, snapshot));
+      }
+      localStorage.removeItem(CLOUD_DIRTY_KEY);
+      reportCloudStatus('synced');
+    } catch (error) {
+      console.error('同步 Supabase 数据失败', error);
+      reportCloudStatus('error', error.message || '云端同步失败');
+    } finally {
+      cloudFlushPromise = null;
+      if (pendingCloudState && !localStorage.getItem(CLOUD_DIRTY_KEY)) {
+        queueCloudSave(pendingCloudState);
+      }
+    }
+  });
+}
+
+export async function load() {
+  const localState = readLocalState();
+  if (!isSupabaseConfigured()) return localState;
+  try {
+    const client = await withTimeout(getSupabaseClient());
+    if (localStorage.getItem(CLOUD_DIRTY_KEY)) {
+      await withTimeout(uploadCloudState(client, localState));
+      localStorage.removeItem(CLOUD_DIRTY_KEY);
+      return localState;
+    }
+    const { data, error } = await withTimeout(client
+      .from(CLOUD_TABLE)
+      .select('state, updated_at')
+      .eq('id', SUPABASE_CONFIG.familyId)
+      .maybeSingle());
+    if (error) throw error;
+
+    if (data?.state) {
+      const cloudState = normalizeState(data.state);
+      writeLocalState(cloudState);
+      return cloudState;
+    }
+
+    await withTimeout(uploadCloudState(client, localState));
+    localStorage.removeItem(CLOUD_DIRTY_KEY);
+    writeLocalState(localState);
+    return localState;
+  } catch (error) {
+    console.error('读取 Supabase 数据失败，已回退到本地数据', error);
+    setTimeout(() => reportCloudStatus(
+      'error',
+      '云端读取失败，当前使用本地数据'
+    ), 0);
+    return localState;
+  }
+}
+
+export const save = state => {
+  const localSaved = writeLocalState(state);
+  if (localSaved) queueCloudSave(state);
+  return localSaved;
 };
