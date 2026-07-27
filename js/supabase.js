@@ -6,8 +6,8 @@
  * The anon key is designed for browser use; access is controlled by RLS.
  */
 export const SUPABASE_CONFIG = {
-  url: '',
-  anonKey: '',
+  url: 'https://mefkdpgkyaiixcccpymy.supabase.co',
+  anonKey: 'sb_publishable_nHozmxmlha__o6paE3pwjg_ReSdKtCR',
   familyId: '00000000-0000-0000-0000-000000000001'
 };
 
