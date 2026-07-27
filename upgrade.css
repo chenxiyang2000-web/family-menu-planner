@@ -195,7 +195,7 @@ input:focus,select:focus,textarea:focus{outline:2px solid rgba(142,53,43,.28);bo
   border-radius:5px;
   box-shadow:3px 4px 0 var(--vintage-shadow);
 }
-.dish-card{transition:transform .15s ease,box-shadow .15s ease}
+.dish-card{display:flex;flex-direction:column;transition:transform .15s ease,box-shadow .15s ease}
 .dish-card:hover{transform:translateY(-2px) rotate(-.08deg);box-shadow:5px 7px 0 var(--vintage-shadow)}
 .dish-image{
   height:auto;
@@ -209,8 +209,8 @@ input:focus,select:focus,textarea:focus{outline:2px solid rgba(142,53,43,.28);bo
   background-repeat:no-repeat;
   filter:none;
 }
-.dish-body{padding:15px}.dish-title{font-size:21px}
-.dish-foot{border-top:1px dashed #917d5e;background:rgba(226,210,178,.35)}
+.dish-body{flex:1;padding:15px}.dish-title{font-size:21px}
+.dish-foot{margin-top:auto;border-top:1px dashed #917d5e;background:rgba(226,210,178,.35)}
 .favorite{border:1px solid #806b4d;border-radius:3px;background:#f4e8d1;color:var(--vintage-red)}
 .workspace-card{
   border-top:4px solid var(--vintage-green);

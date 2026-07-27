@@ -23,45 +23,78 @@ export function eligible(state, plan, meal, excluded = new Set(), category = '')
   return fresh.length ? fresh : matches;
 }
 
-function score(dish, plan, dayDishes) {
+function score(dish, plan, mealDishes, adjustment = 0) {
   let value = Math.random() * 4 + (dish.favorite ? 5 : 0);
   if (plan.goal === '清淡' && (dish.healthTags.includes('清淡') || dish.healthTags.includes('低油'))) value += 7;
   if (plan.goal === '高蛋白' && dish.healthTags.includes('高蛋白')) value += 7;
   if (plan.goal === '低糖' && dish.healthTags.includes('低糖')) value += 7;
-  if (dayDishes.some(d => d.category === dish.category)) value -= 4;
-  return value;
+  if (mealDishes.some(d => d.category === dish.category)) value -= 4;
+  return value + adjustment;
 }
 
-function pick(state, plan, meal, used, dayDishes, category = '') {
-  return eligible(state, plan, meal, used, category)
-    .filter(d => d.category !== '超大菜')
-    .filter(d => !dayDishes.some(existing => existing.id === d.id))
-    .sort((a,b) => score(b, plan, dayDishes) - score(a, plan, dayDishes))[0];
+function strictCandidates(state, plan, meal, category = '') {
+  return eligible(state, plan, meal, new Set(), category)
+    .filter(d => d.category !== '超大菜');
 }
 
-function pickWithBudget(state, plan, meal, used, dayDishes, category, remainingBudget, remainingSlots) {
-  const candidates=eligible(state,plan,meal,used,category)
-    .filter(d=>d.category!=='超大菜')
-    .filter(d=>!dayDishes.some(existing=>existing.id===d.id));
+function pickWithBudget(
+  state,
+  plan,
+  meal,
+  used,
+  mealDishes,
+  dayUsed,
+  category,
+  remainingBudget,
+  remainingSlots,
+  {
+    allowNoodle = true,
+    previousDayHadNoodle = false
+  } = {}
+) {
+  const mealIds = new Set(mealDishes.map(d => d.id));
+  let candidates = strictCandidates(state, plan, meal, category)
+    .filter(d => !mealIds.has(d.id))
+    .filter(d => !dayUsed.has(d.id))
+    .filter(d => allowNoodle || !isNoodleStaple(d));
   if(!candidates.length)return null;
-  if(!Number(plan.budget))return candidates.sort((a,b)=>score(b,plan,dayDishes)-score(a,plan,dayDishes))[0];
+  const globallyFresh = candidates.filter(d => !used.has(d.id));
+  const keepAllStaplesForSpacing = previousDayHadNoodle && category === '主食';
+  if (globallyFresh.length && !keepAllStaplesForSpacing) candidates = globallyFresh;
+  const adjustedScore = dish => score(
+    dish,
+    plan,
+    mealDishes,
+    (previousDayHadNoodle && isNoodleStaple(dish) ? -8 : 0) +
+    (keepAllStaplesForSpacing && !used.has(dish.id) ? 2 : 0)
+  );
+  if(!Number(plan.budget))return candidates.sort((a,b)=>adjustedScore(b)-adjustedScore(a))[0];
   const allowance=Math.max(0,remainingBudget)/Math.max(1,remainingSlots);
   const affordable=candidates.filter(d=>Number(d.price||0)<=allowance*1.15);
   const pool=affordable.length?affordable:candidates;
   return pool.sort((a,b)=>{
     const priceDifference=Number(a.price||0)-Number(b.price||0);
-    return affordable.length ? score(b,plan,dayDishes)-score(a,plan,dayDishes) : priceDifference;
+    return affordable.length ? adjustedScore(b)-adjustedScore(a) : priceDifference;
   })[0];
 }
 
 export function distributeSelected(state, plan, selectedIds) {
   const slots = structuredClone(plan.slots || {});
   const targets = dayIndexes(plan).flatMap(day => plan.meals.map(meal => ({ day, meal })));
+  const noodleDays = new Set();
+  Object.entries(slots).forEach(([key, items]) => {
+    if (items.some(item => isNoodleStaple(dishOf(state, item)))) {
+      noodleDays.add(Number(key.split('|')[0]));
+    }
+  });
   selectedIds.forEach((dishId, index) => {
     const d = state.dishes.find(item => item.id === dishId);
     const compatible = targets.filter(t => d?.meals.includes(t.meal));
     if (!compatible.length) return;
-    const target = compatible[index % compatible.length];
+    const target = isNoodleStaple(d)
+      ? compatible.find(item => !noodleDays.has(item.day)) || compatible[index % compatible.length]
+      : compatible[index % compatible.length];
+    if (isNoodleStaple(d)) noodleDays.add(target.day);
     const key = slotKey(target.day, target.meal);
     slots[key] = [...(slots[key] || []), {
       dishId,
@@ -75,7 +108,23 @@ export function distributeSelected(state, plan, selectedIds) {
 export function buildSelectedPlan(state, plan, selectedIds, autoFill = false) {
   const selectedSlots = distributeSelected(state, plan, selectedIds);
   if (!autoFill) return selectedSlots;
-  const generatedSlots = generateCompletePlan(state, plan);
+  const preexistingNoodleDays = new Set();
+  const preexistingNoodleSlots = new Set();
+  const noodleBlockedSlots = new Set();
+  Object.entries(selectedSlots).forEach(([key, items]) => {
+    if (!items.length) return;
+    if (items.some(item => isNoodleStaple(dishOf(state, item)))) {
+      preexistingNoodleDays.add(Number(key.split('|')[0]));
+      preexistingNoodleSlots.add(key);
+    } else {
+      noodleBlockedSlots.add(key);
+    }
+  });
+  const generatedSlots = generateCompletePlan(state, plan, {
+    preexistingNoodleDays,
+    preexistingNoodleSlots,
+    noodleBlockedSlots
+  });
   const merged = structuredClone(selectedSlots);
   const globallyUsed = new Set(Object.values(merged).flat().map(item => item.dishId));
   for (const [key, generatedItems] of Object.entries(generatedSlots)) {
@@ -140,7 +189,7 @@ export function buildSelectedPlan(state, plan, selectedIds, autoFill = false) {
   return merged;
 }
 
-export function generateCompletePlan(state, plan) {
+export function generateCompletePlan(state, plan, options = {}) {
   const slots = {}, used = new Set();
   const ratios = healthStandards[plan.goal] || healthStandards['均衡'];
   const people=Number(plan.people);
@@ -153,24 +202,49 @@ export function generateCompletePlan(state, plan) {
   const slotsPerDay=plan.meals.reduce((sum,meal)=>sum+(meal==='早餐'?Math.min(Math.max(people-1,0),4)+1:dishCount+2),0);
   const totalPlannedSlots=Number(plan.days)*slotsPerDay;
   let remainingBudget=Number(plan.budget)||Infinity,remainingSlots=totalPlannedSlots,estimatedCost=0;
+  const preexistingNoodleDays=options.preexistingNoodleDays || new Set();
+  const preexistingNoodleSlots=options.preexistingNoodleSlots || new Set();
+  const noodleBlockedSlots=options.noodleBlockedSlots || new Set();
+  let previousDayHadNoodle=false;
 
-  const addFromCategory=(meal,dayDishes,category,quantity=1) => {
-    const selected=pickWithBudget(state,plan,meal,used,dayDishes,category,remainingBudget,remainingSlots);
+  const addFromCategory=(meal,mealDishes,dayUsed,category,quantity=1,pickOptions={}) => {
+    const selected=pickWithBudget(
+      state,plan,meal,used,mealDishes,dayUsed,category,
+      remainingBudget,remainingSlots,pickOptions
+    );
     if(!selected)return null;
-    used.add(selected.id);dayDishes.push(selected);
+    used.add(selected.id);dayUsed.add(selected.id);mealDishes.push(selected);
     const selectedPrice=Number(selected.price||0)*quantity;estimatedCost+=selectedPrice;
     if(Number.isFinite(remainingBudget))remainingBudget-=selectedPrice;
     remainingSlots=Math.max(0,remainingSlots-1);
     return {dishId:selected.id,quantity,servings:people,locked:false};
   };
 
+  const failIncomplete=(meal,detail)=>{
+    throw new Error(`${meal}无法生成完整菜单：${detail}。请补充符合人数、餐次、菜系和辣度条件的菜品后重试。`);
+  };
+
+  const sortItems=items=>items.sort((a,b)=>{
+    const aIndex=categoryOrder.indexOf(dishOf(state,a)?.category);
+    const bIndex=categoryOrder.indexOf(dishOf(state,b)?.category);
+    return (aIndex<0?categoryOrder.length:aIndex)-(bIndex<0?categoryOrder.length:bIndex);
+  });
+
   for (const day of dayIndexes(plan)) {
+    let dayHasNoodle=preexistingNoodleDays.has(day);
+    const dayUsed=new Set();
     for (const meal of plan.meals) {
-      const key=slotKey(day,meal),dayDishes=[],items=[];
-      const staple=addFromCategory(meal,dayDishes,'主食',people);
+      const key=slotKey(day,meal),mealDishes=[],items=[];
+      if(preexistingNoodleSlots.has(key)){slots[key]=[];continue}
+      const staple=addFromCategory(meal,mealDishes,dayUsed,'主食',people,{
+        allowNoodle:!dayHasNoodle&&!noodleBlockedSlots.has(key),
+        previousDayHadNoodle
+      });
+      if(!staple)failIncomplete(meal,'没有可用主食');
       if(staple){
         generatedCounts.staple+=people;
         if(isNoodleStaple(dishOf(state,staple))){
+          dayHasNoodle=true;
           slots[key]=[staple];
           continue;
         }
@@ -179,33 +253,52 @@ export function generateCompletePlan(state, plan) {
         const breakfastDishCount=Math.min(Math.max(people-1,0),4);
         const breakfastMeatCount=Math.round(breakfastDishCount*ratios.meat/meatVegetableTotal);
         const breakfastVegetableCount=breakfastDishCount-breakfastMeatCount;
-        for(let i=0;i<breakfastMeatCount;i++){const item=addFromCategory(meal,dayDishes,'肉菜');if(item){items.push(item);generatedCounts.meat++}}
-        for(let i=0;i<breakfastVegetableCount;i++){const item=addFromCategory(meal,dayDishes,'蔬菜');if(item){items.push(item);generatedCounts.vegetable++}}
-        const breakfastFallbackOrder=ratios.vegetable>=ratios.meat?['蔬菜','肉菜']:['肉菜','蔬菜'];
-        while(items.length<breakfastDishCount){
-          let added=false;
-          for(const category of breakfastFallbackOrder){
-            const item=addFromCategory(meal,dayDishes,category);
-            if(!item)continue;
-            items.push(item);
-            if(category==='肉菜')generatedCounts.meat++;else generatedCounts.vegetable++;
-            added=true;
-            break;
-          }
-          if(!added)break;
+        const breakfastTargets=[
+          ...Array(breakfastMeatCount).fill('肉菜'),
+          ...Array(breakfastVegetableCount).fill('蔬菜')
+        ];
+        for(const preferredCategory of breakfastTargets){
+          const fallbackCategory=preferredCategory==='肉菜'?'蔬菜':'肉菜';
+          let item=addFromCategory(meal,mealDishes,dayUsed,preferredCategory);
+          if(!item)item=addFromCategory(meal,mealDishes,dayUsed,fallbackCategory);
+          if(!item)failIncomplete(meal,`肉类/蔬菜候选不足，目标 ${breakfastDishCount} 道`);
+          items.push(item);
+          const actualCategory=dishOf(state,item)?.category;
+          if(actualCategory==='肉菜')generatedCounts.meat++;else generatedCounts.vegetable++;
         }
         if(staple)items.push(staple);
-        slots[key]=items.sort((a,b)=>categoryOrder.indexOf(dishOf(state,a)?.category)-categoryOrder.indexOf(dishOf(state,b)?.category));
+        if(items.length!==breakfastDishCount+1)failIncomplete(meal,'生成数量校验失败');
+        slots[key]=sortItems(items);
         continue;
       }
-      for(let i=0;i<meatCount;i++){const item=addFromCategory(meal,dayDishes,'肉菜');if(item){items.push(item);generatedCounts.meat++}}
-      for(let i=0;i<vegetableCount;i++){const item=addFromCategory(meal,dayDishes,'蔬菜');if(item){items.push(item);generatedCounts.vegetable++}}
+      const sideTargets=[
+        ...Array(meatCount).fill('肉菜'),
+        ...Array(vegetableCount).fill('蔬菜')
+      ];
+      for(const preferredCategory of sideTargets){
+        const fallbackCategory=preferredCategory==='肉菜'?'蔬菜':'肉菜';
+        let item=addFromCategory(meal,mealDishes,dayUsed,preferredCategory);
+        if(!item)item=addFromCategory(meal,mealDishes,dayUsed,fallbackCategory);
+        if(!item)failIncomplete(meal,`肉类/蔬菜候选不足，目标 ${dishCount} 道`);
+        items.push(item);
+        const actualCategory=dishOf(state,item)?.category;
+        if(actualCategory==='肉菜')generatedCounts.meat++;else generatedCounts.vegetable++;
+      }
       if(staple)items.push(staple);
       const preferOther=plan.goal==='清淡'||plan.goal==='低糖'||Math.random()<0.5;
-      let last=addFromCategory(meal,dayDishes,preferOther?'汤饮':'甜品');
-      if(last){items.push(last);generatedCounts.other++}
-      slots[key]=items.sort((a,b)=>categoryOrder.indexOf(dishOf(state,a)?.category)-categoryOrder.indexOf(dishOf(state,b)?.category));
+      const otherOrder=preferOther?['汤饮','甜品','其他']:['甜品','汤饮','其他'];
+      let last=null;
+      for(const category of otherOrder){
+        last=addFromCategory(meal,mealDishes,dayUsed,category);
+        if(last)break;
+      }
+      if(!last)failIncomplete(meal,'没有可用的甜品、汤饮或其他菜品');
+      items.push(last);generatedCounts.other++;
+      if(items.length!==dishCount+2)failIncomplete(meal,'生成数量校验失败');
+      if(new Set(items.map(item=>item.dishId)).size!==items.length)failIncomplete(meal,'出现重复菜品');
+      slots[key]=sortItems(items);
     }
+    previousDayHadNoodle=dayHasNoodle;
   }
   plan.generationProfile = {
     standard:plan.goal, ratios:{...ratios}, people,

@@ -43,7 +43,7 @@ async function runBusy(button,label,task){
   const oldText=button?.textContent;
   if(button){button.disabled=true;button.textContent=label}
   try{await nextPaint();await task()}
-  catch(error){console.error(error);showToast('操作失败，请重试。','error')}
+  catch(error){console.error(error);showToast(error.message||'操作失败，请重试。','error')}
   finally{operationBusy=false;if(button?.isConnected){button.disabled=false;button.textContent=oldText}}
 }
 const checks=(name,options,selected,suffix='',type='checkbox')=>options.map(x=>`<label><input type="${type}" name="${name}" value="${x}" ${selected.includes(x)?'checked':''}> ${x}${suffix}</label>`).join('');
