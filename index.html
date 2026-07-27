@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>家常菜单 · 家庭点菜与菜单规划</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="upgrade.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#library" data-view="library"><span>家常</span>菜单</a>
+    <nav aria-label="主导航">
+      <button data-view="library" class="nav-btn active">ALL</button>
+      <button data-view="start" class="nav-btn">START</button>
+      <button data-view="shopping" class="nav-btn">LIST</button>
+    </nav>
+    <button class="icon-btn" id="export-data" title="导出所有数据">⇩</button>
+  </header>
+  <main id="app" class="container"></main>
+  <dialog id="dish-dialog" class="modal"></dialog>
+  <dialog id="slot-dialog" class="modal"></dialog>
+  <input id="import-file" type="file" accept="application/json,.json" hidden>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
