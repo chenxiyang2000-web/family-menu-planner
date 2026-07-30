@@ -3,10 +3,65 @@ import { healthStandards } from './storage.js';
 export const slotKey = (day, meal) => `${day}|${meal}`;
 export const dayIndexes = plan => Array.from({ length: Number(plan.days) }, (_, i) => i);
 export const getSlot = (plan, day, meal) => plan.slots[slotKey(day, meal)] || [];
-export const dishOf = (state, item) => state.dishes.find(d => d.id === item.dishId);
+let indexedDishSource = null;
+let indexedDishes = new Map();
+let candidateSource = null;
+let candidateIndex = new Map();
+function ensureDishIndexes(state) {
+  if (indexedDishSource !== state.dishes) {
+    indexedDishSource = state.dishes;
+    indexedDishes = new Map(state.dishes.map(dish => [dish.id, dish]));
+  }
+  if (candidateSource !== state.dishes) {
+    candidateSource = state.dishes;
+    candidateIndex = new Map();
+    state.dishes.forEach(dish => {
+      (dish.meals || []).forEach(meal => {
+        (dish.servingOptions || []).map(Number).forEach(people => {
+          for (const category of ['', dish.category]) {
+            const key = `${people}|${meal}|${category}`;
+            if (!candidateIndex.has(key)) candidateIndex.set(key, []);
+            candidateIndex.get(key).push(dish);
+          }
+        });
+      });
+    });
+  }
+}
+export const dishOf = (state, item) => {
+  ensureDishIndexes(state);
+  return indexedDishes.get(item?.dishId);
+};
 export const currentPlan = state => state.plans.find(p => p.id === state.currentPlanId) || state.plans[0];
 export const isNoodleStaple = dish =>
   dish?.category === '主食' && String(dish.name || '').trim().endsWith('面');
+export const isSeafood = dish => {
+  const searchable = `${dish?.name || ''} ${(dish?.ingredients || []).join(' ')}`;
+  return dish?.tags?.includes('海鲜') || /海鲜|鱼|虾|蟹|贝|蛤|蚝|鱿|章鱼|鲍/.test(searchable);
+};
+
+export const menuPreferenceOptions = {
+  health: ['均衡营养', '低脂', '少油少盐', '高蛋白'],
+  audience: ['普通', '儿童友好', '老人友好'],
+  scene: ['日常', '聚餐', '宴请']
+};
+export function normalizePreferences(preferences = {}) {
+  const legacyHealth = {
+    均衡: '均衡营养',
+    清淡: '少油少盐',
+    低糖: '低脂',
+    高蛋白: '高蛋白'
+  };
+  return {
+    health: menuPreferenceOptions.health.includes(preferences.health)
+      ? preferences.health
+      : (legacyHealth[preferences.health] || '均衡营养'),
+    audience: menuPreferenceOptions.audience.includes(preferences.audience)
+      ? preferences.audience : '普通',
+    scene: menuPreferenceOptions.scene.includes(preferences.scene)
+      ? preferences.scene : '日常'
+  };
+}
 
 const CATEGORY_ORDER = ['肉菜', '蔬菜', '主食', '甜品', '汤饮', '其他'];
 const OTHER_CATEGORIES = new Set(['甜品', '汤饮', '其他']);
@@ -20,9 +75,15 @@ function bucketOf(dish) {
   return '';
 }
 
-export function getMealTarget(plan, meal) {
+export function getMealTarget(plan, meal, preferences = {}) {
   const people = Math.max(1, Number(plan.people) || 1);
-  const ratios = healthStandards[plan.goal] || healthStandards['均衡'];
+  const pref = normalizePreferences({ health: preferences.health || plan.goal });
+  const ratioKey = pref.health === '高蛋白'
+    ? '高蛋白'
+    : pref.health === '低脂' || pref.health === '少油少盐'
+      ? '清淡'
+      : '均衡';
+  const ratios = healthStandards[ratioKey] || healthStandards['均衡'];
   const sideCount = meal === '早餐'
     ? Math.min(Math.max(people - 1, 0), 4)
     : (people <= 2 ? 2 : people + 1);
@@ -46,10 +107,9 @@ export function eligible(state, plan, meal, excluded = new Set(), category = '')
   const dislikes = String(plan.dislike || '').split(/[，、\s]+/).filter(Boolean);
   const cuisines = Array.isArray(plan.cuisines) ? plan.cuisines : [];
   const maxSpicy = Math.max(0, Math.min(5, Number(plan.maxSpicy ?? 5)));
-  const matches = state.dishes.filter(d =>
-    (!category || d.category === category) &&
-    Array.isArray(d.meals) && d.meals.includes(meal) &&
-    Array.isArray(d.servingOptions) && d.servingOptions.map(Number).includes(Number(plan.people)) &&
+  ensureDishIndexes(state);
+  const base = candidateIndex.get(`${Number(plan.people)}|${meal}|${category}`) || [];
+  const matches = base.filter(d =>
     (!cuisines.length || cuisines.includes(d.cuisine)) &&
     Number(d.spicyLevel || 0) <= maxSpicy &&
     !dislikes.some(word =>
@@ -85,19 +145,53 @@ function historyContext(state, plan) {
   return { usage, previousDayHadNoodle };
 }
 
-function score(dish, plan, mealDishes, historyUsage, adjustment = 0) {
+function preferenceAdjustment(dish, preferences) {
+  const pref = normalizePreferences(preferences);
+  const tags = new Set(dish.healthTags || []);
+  const text = `${dish.name || ''} ${(dish.ingredients || []).join(' ')}`;
+  const fried = /炸|油煎|酥|油焖/.test(text);
+  const sugary = /糖|蜜|奶油|蛋糕|布丁|甜/.test(text);
+  const stimulating = /麻辣|香辣|辣椒|腌|咸|重口/.test(text);
+  let value = 0;
+  if (pref.health === '低脂') value += tags.has('低油') ? 8 : 0, value -= fried ? 9 : 0;
+  if (pref.health === '少油少盐') {
+    value += tags.has('低油') ? 6 : 0;
+    value += tags.has('低盐') ? 7 : 0;
+    value += tags.has('清淡') ? 5 : 0;
+    value -= fried || stimulating ? 8 : 0;
+  }
+  if (pref.health === '高蛋白') value += tags.has('高蛋白') ? 8 : 0;
+  if (pref.audience === '老人友好') {
+    value += tags.has('低油') || tags.has('低盐') || tags.has('清淡') ? 7 : 0;
+    value += isSeafood(dish) ? 7 : 0;
+    value += dish.category === '蔬菜' || dish.category === '汤饮' ? 5 : 0;
+    value += tags.has('高蛋白') ? 3 : 0;
+    value -= fried || sugary || stimulating || Number(dish.spicyLevel || 0) > 1 ? 10 : 0;
+  }
+  if (pref.audience === '儿童友好') {
+    value += tags.has('高蛋白') ? 6 : 0;
+    value += dish.category === '蔬菜' ? 4 : 0;
+    value += dish.cuisine === '中餐' ? 2 : 0;
+    value -= stimulating || Number(dish.spicyLevel || 0) > 1 ? 12 : 0;
+  }
+  if (pref.scene === '日常' && dish.cuisine === '中餐') value += 1.5;
+  if (pref.scene !== '日常' && dish.favorite) value += 2;
+  return value;
+}
+
+function score(dish, plan, mealDishes, historyUsage, preferences, adjustment = 0) {
   let value = Math.random() * 4 + (dish.favorite ? 5 : 0);
-  if (plan.goal === '清淡' && (dish.healthTags?.includes('清淡') || dish.healthTags?.includes('低油'))) value += 7;
-  if (plan.goal === '高蛋白' && dish.healthTags?.includes('高蛋白')) value += 7;
-  if (plan.goal === '低糖' && dish.healthTags?.includes('低糖')) value += 7;
+  value += preferenceAdjustment(dish, preferences);
   if (mealDishes.some(d => d.category === dish.category)) value -= 4;
   value -= (historyUsage.get(dish.id) || 0) * 2.5;
   return value + adjustment;
 }
 
-function strictCandidates(state, plan, meal, category = '') {
+function strictCandidates(state, plan, meal, category = '', preferences = {}) {
+  const pref = normalizePreferences(preferences);
   return eligible(state, plan, meal, new Set(), category)
-    .filter(d => d.category !== '超大菜');
+    .filter(d => d.category !== '超大菜')
+    .filter(d => pref.audience === '普通' || Number(d.spicyLevel || 0) <= 1);
 }
 
 function pickCandidate(
@@ -111,10 +205,11 @@ function pickCandidate(
   remainingBudget,
   remainingSlots,
   historyUsage,
+  preferences,
   { allowNoodle = true, previousDayHadNoodle = false } = {}
 ) {
   const mealIds = new Set(mealDishes.map(d => d.id));
-  let candidates = strictCandidates(state, plan, meal, category)
+  let candidates = strictCandidates(state, plan, meal, category, preferences)
     .filter(d => !mealIds.has(d.id))
     .filter(d => !dayUsed.has(d.id))
     .filter(d => allowNoodle || !isNoodleStaple(d));
@@ -126,6 +221,7 @@ function pickCandidate(
     plan,
     mealDishes,
     historyUsage,
+    preferences,
     previousDayHadNoodle && isNoodleStaple(dish) ? -18 : 0
   );
   if (!Number(plan.budget)) return [...candidates].sort((a, b) => adjustedScore(b) - adjustedScore(a))[0];
@@ -148,6 +244,110 @@ function countsFor(state, items) {
   return counts;
 }
 
+function isFriedOrHeavy(dish) {
+  const text = `${dish?.name || ''} ${(dish?.ingredients || []).join(' ')}`;
+  return /炸|油煎|酥|油焖|麻辣|香辣|重口/.test(text);
+}
+
+export function analyzeMenu(state, plan, preferences = {}, slots = plan.slots || {}) {
+  const pref = normalizePreferences(preferences);
+  const meals = [];
+  const warnings = [];
+  const blockers = [];
+  let totalDishes = 0;
+  let meat = 0;
+  let vegetables = 0;
+  let seafood = 0;
+  let soup = 0;
+  let friedOrHeavy = 0;
+
+  for (const day of dayIndexes(plan)) {
+    for (const meal of plan.meals) {
+      const key = slotKey(day, meal);
+      const items = (slots[key] || []).filter(item => item?.dishId);
+      const dishes = items.map(item => dishOf(state, item)).filter(Boolean);
+      const target = getMealTarget(plan, meal, pref);
+      const counts = countsFor(state, items);
+      const noodleCount = dishes.filter(isNoodleStaple).length;
+      const gaps = {
+        meat: Math.max(0, target.meat - counts.meat),
+        vegetable: Math.max(0, target.vegetable - counts.vegetable),
+        staple: Math.max(0, target.staple - counts.staple),
+        other: Math.max(0, target.other - counts.other),
+        soup: 0
+      };
+      const hasSoup = dishes.some(dish => dish.category === '汤饮');
+      if (meal !== '早餐' && !noodleCount && !hasSoup && gaps.other === 0) gaps.soup = 1;
+      const needed = Object.values(gaps).reduce((sum, value) => sum + value, 0);
+      const capacity = Math.max(0, target.total - items.length);
+      const mealWarnings = [];
+      if (items.length > target.total) {
+        blockers.push(`第 ${day + 1} 天${meal}已有 ${items.length} 道，超过 ${plan.people} 人建议上限 ${target.total} 道`);
+      }
+      if (needed > capacity && !noodleCount) {
+        blockers.push(`第 ${day + 1} 天${meal}现有分类失衡，保留全部已有菜品后没有足够位置补齐`);
+      }
+      if (noodleCount > 1 || (noodleCount && items.length > 1)) {
+        blockers.push(`第 ${day + 1} 天${meal}的面类主食需要单独成餐`);
+      }
+      if (items.length && counts.vegetable === 0 && !noodleCount) mealWarnings.push('缺少蔬菜');
+      if (meal !== '早餐' && items.length && !hasSoup && !noodleCount) {
+        mealWarnings.push('缺少汤饮');
+      }
+      if (items.length && counts.staple === 0 && !noodleCount) mealWarnings.push('缺少主食');
+      if (dishes.length && dishes.filter(isFriedOrHeavy).length / dishes.length >= 0.5) mealWarnings.push('油炸或重口味比例偏高');
+      meals.push({ day, meal, key, current: items.length, target, counts, gaps, capacity, warnings: mealWarnings });
+
+      totalDishes += dishes.length;
+      meat += counts.meat;
+      vegetables += counts.vegetable;
+      seafood += dishes.filter(isSeafood).length;
+      soup += dishes.filter(dish => dish.category === '汤饮').length;
+      friedOrHeavy += dishes.filter(isFriedOrHeavy).length;
+    }
+  }
+  if (totalDishes && meat / totalDishes > 0.6) warnings.push('当前菜单肉类比例明显偏高');
+  if (totalDishes && vegetables === 0) warnings.push('当前菜单没有蔬菜');
+  if (totalDishes && friedOrHeavy / totalDishes >= 0.5) warnings.push('当前菜单油炸或重口味菜品比例明显偏高');
+  if (totalDishes && soup === 0 && plan.meals.some(meal => meal !== '早餐')) warnings.push('当前菜单没有汤饮');
+  if (pref.audience === '老人友好' && totalDishes && seafood === 0) warnings.push('老人友好菜单建议补充鱼类或海鲜');
+  return {
+    preferences: pref,
+    meals,
+    warnings: [...new Set(warnings)],
+    blockers: [...new Set(blockers)],
+    totals: { dishes: totalDishes, meat, vegetables, seafood, soup, friedOrHeavy },
+    missing: meals.reduce((sum, item) =>
+      sum + Object.values(item.gaps).reduce((value, gap) => value + gap, 0), 0)
+  };
+}
+
+export function completeExistingMenu(state, plan, preferences = {}) {
+  const pref = normalizePreferences(preferences);
+  const before = analyzeMenu(state, plan, pref);
+  if (before.blockers.length) {
+    throw new Error(`当前菜单需要先整理：${before.blockers[0]}。已有菜品不会被自动删除。`);
+  }
+  const previousGoal = plan.goal;
+  const goalMap = {
+    均衡营养: '均衡',
+    低脂: '清淡',
+    少油少盐: '清淡',
+    高蛋白: '高蛋白'
+  };
+  plan.goal = goalMap[pref.health] || previousGoal || '均衡';
+  try {
+    const completed = generateCompletePlan(state, plan, {
+      seedSlots: structuredClone(plan.slots || {}),
+      preferences: pref
+    });
+    return { slots: completed, before, after: analyzeMenu(state, plan, pref, completed) };
+  } catch (error) {
+    plan.goal = previousGoal;
+    throw error;
+  }
+}
+
 function validateDishForPlan(state, plan, dish, meal) {
   return dish &&
     dish.category !== '超大菜' &&
@@ -155,11 +355,16 @@ function validateDishForPlan(state, plan, dish, meal) {
 }
 
 export function distributeSelected(state, plan, selectedIds) {
-  const slots = {};
+  const slots = structuredClone(plan.slots || {});
   const targets = dayIndexes(plan).flatMap(day =>
     plan.meals.map(meal => ({ day, meal, key: slotKey(day, meal), target: getMealTarget(plan, meal) }))
   );
   const selectedDayUses = new Map();
+  targets.forEach(target => (slots[target.key] || []).forEach(item => {
+    if (!item?.dishId) return;
+    if (!selectedDayUses.has(item.dishId)) selectedDayUses.set(item.dishId, new Set());
+    selectedDayUses.get(item.dishId).add(target.day);
+  }));
 
   for (const dishId of selectedIds) {
     const dish = state.dishes.find(item => item.id === dishId);
@@ -179,8 +384,7 @@ export function distributeSelected(state, plan, selectedIds) {
         }
         if (hasNoodle) return false;
         const bucket = bucketOf(dish);
-        const counts = countsFor(state, existing);
-        return bucket && counts[bucket] < item.target[bucket] && existing.length < item.target.total;
+        return bucket && existing.length < item.target.total;
       })
       .sort((a, b) => {
         const aItems = slots[a.key] || [];
@@ -216,10 +420,11 @@ export function generateCompletePlan(state, plan, options = {}) {
   const slots = {};
   const used = new Set();
   const people = Math.max(1, Number(plan.people) || 1);
+  const preferences = normalizePreferences(options.preferences || { health: plan.goal });
   const history = historyContext(state, plan);
   const seedSlots = structuredClone(options.seedSlots || {});
   const totalPlannedSlots = dayIndexes(plan).reduce((total, day) =>
-    total + plan.meals.reduce((sum, meal) => sum + getMealTarget(plan, meal).total, 0), 0
+    total + plan.meals.reduce((sum, meal) => sum + getMealTarget(plan, meal, preferences).total, 0), 0
   );
   let remainingBudget = Number(plan.budget) || Infinity;
   let remainingSlots = totalPlannedSlots;
@@ -245,7 +450,7 @@ export function generateCompletePlan(state, plan, options = {}) {
     let dayHasNoodle = false;
     for (const meal of plan.meals) {
       const key = slotKey(day, meal);
-      const target = getMealTarget(plan, meal);
+      const target = getMealTarget(plan, meal, preferences);
       const items = [...(seedSlots[key] || [])];
       const mealDishes = [];
 
@@ -271,15 +476,12 @@ export function generateCompletePlan(state, plan, options = {}) {
         continue;
       }
 
-      const initialCounts = countsFor(state, items);
-      for (const bucket of ['meat', 'vegetable', 'staple', 'other']) {
-        if (initialCounts[bucket] > target[bucket]) fail(meal, `已选${bucket === 'meat' ? '肉菜' : bucket === 'vegetable' ? '蔬菜' : bucket === 'staple' ? '主食' : '甜品/汤饮/其他'}数量超过餐次上限`);
-      }
+      if (items.length > target.total) fail(meal, `已有 ${items.length} 道，超过当前人数建议上限 ${target.total} 道`);
 
       const add = (category, quantity = 1, pickOptions = {}) => {
         const selected = pickCandidate(
           state, plan, meal, used, mealDishes, dayUsed, category,
-          remainingBudget, remainingSlots, history.usage, pickOptions
+          remainingBudget, remainingSlots, history.usage, preferences, pickOptions
         );
         if (!selected) return null;
         const item = { dishId: selected.id, quantity, servings: people, locked: false };
@@ -319,9 +521,11 @@ export function generateCompletePlan(state, plan, options = {}) {
         counts = countsFor(state, items);
       }
       while (counts.other < target.other) {
-        const order = plan.goal === '清淡' || plan.goal === '低糖'
+        const order = preferences.health === '少油少盐' ||
+          preferences.health === '低脂' ||
+          preferences.audience === '老人友好'
           ? ['汤饮', '其他', '甜品']
-          : ['甜品', '汤饮', '其他'];
+          : ['汤饮', '甜品', '其他'];
         let added = null;
         for (const category of order) {
           added = add(category);

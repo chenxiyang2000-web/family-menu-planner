@@ -20,7 +20,8 @@ const withTimeout = (promise, milliseconds = 8000) => Promise.race([
 
 export const categories = ['肉菜', '蔬菜', '主食', '汤饮', '甜品', '超大菜', '其他'];
 export const meals = ['早餐', '午餐', '晚餐'];
-export const healthTags = ['高蛋白', '蔬菜', '全谷物', '清淡', '低油', '低糖'];
+export const healthTags = ['低盐', '低油', '低糖', '清淡', '高蛋白'];
+export const ingredientTags = ['海鲜'];
 export const cuisineOptions = ['中餐', '日料', '意大利菜', '法餐', '韩餐', '东南亚菜', '西餐', '其他'];
 export const servingOptions = [1, 2, 4, 8];
 export const healthStandards = {
@@ -52,7 +53,8 @@ const samplePrices = [24,18,32,38,22,13,9,7,12,8,5,10,4,18,8,9];
 
 const makeDish = (row, index) => ({
   id: `sample-${index}`, name: row[0], category: row[1],
-  ingredients: row[2].split(','), healthTags: row[3].split(','),
+  ingredients: row[2].split(','), healthTags: row[3].split(',').filter(tag => healthTags.includes(tag)),
+  tags: /鱼|虾|蟹|贝|海鲜/.test(`${row[0]} ${row[2]}`) ? ['海鲜'] : [],
   cuisine: row[4], meals: row[5].split(','),
   servingOptions: [...servingOptions], favorite: [0,2,6].includes(index),
   image: '', price: samplePrices[index], spicyLevel: [0,2,0,0,3,4,0,0,1,1,0,0,0,0,0,0][index] || 0
@@ -84,7 +86,10 @@ export const defaultState = () => {
 };
 
 function migrateDish(d) {
-  const oldTags = Array.isArray(d.healthTags) ? d.healthTags : (Array.isArray(d.tags) ? d.tags : []);
+  const rawTags = Array.isArray(d.tags) ? d.tags : [];
+  const oldTags = Array.isArray(d.healthTags)
+    ? d.healthTags
+    : rawTags.filter(tag => healthTags.includes(tag));
   const oldPeople = Array.isArray(d.servingOptions) ? d.servingOptions.map(Number) : servingOptions;
   const sampleIndex = String(d.id || '').startsWith('sample-') ? Number(String(d.id).slice(7)) : -1;
   return {
@@ -92,6 +97,7 @@ function migrateDish(d) {
     category: categories.includes(d.category) ? d.category : '其他',
     ingredients: Array.isArray(d.ingredients) ? d.ingredients : [],
     healthTags: oldTags.filter(tag => healthTags.includes(tag)),
+    tags: rawTags.filter(tag => ingredientTags.includes(tag)),
     cuisine: cuisineOptions.includes(d.cuisine) ? d.cuisine : '中餐',
     meals: Array.isArray(d.meals) && d.meals.length ? d.meals.filter(meal => meals.includes(meal)) : ['午餐','晚餐'],
     servingOptions: oldPeople.filter(n => servingOptions.includes(n)).length
@@ -158,7 +164,7 @@ function normalizeState(current) {
   };
 }
 
-function readLocalState() {
+export function loadLocal() {
   try {
     const current = JSON.parse(localStorage.getItem(KEY));
     if (current) return normalizeState(current);
@@ -222,15 +228,16 @@ function queueCloudSave(state) {
   });
 }
 
-export async function load() {
-  const localState = readLocalState();
-  if (!isSupabaseConfigured()) return localState;
+export async function syncCloudState(localState = loadLocal()) {
+  if (!isSupabaseConfigured()) {
+    return { state: localState, source: 'local', configured: false };
+  }
   try {
     const client = await withTimeout(getSupabaseClient());
     if (localStorage.getItem(CLOUD_DIRTY_KEY)) {
       await withTimeout(uploadCloudState(client, localState));
       localStorage.removeItem(CLOUD_DIRTY_KEY);
-      return localState;
+      return { state: localState, source: 'local-uploaded', configured: true };
     }
     const { data, error } = await withTimeout(client
       .from(CLOUD_TABLE)
@@ -242,21 +249,32 @@ export async function load() {
     if (data?.state) {
       const cloudState = normalizeState(data.state);
       writeLocalState(cloudState);
-      return cloudState;
+      return { state: cloudState, source: 'cloud', configured: true };
     }
 
     await withTimeout(uploadCloudState(client, localState));
     localStorage.removeItem(CLOUD_DIRTY_KEY);
     writeLocalState(localState);
-    return localState;
+    return { state: localState, source: 'local-initialized', configured: true };
   } catch (error) {
     console.error('读取 Supabase 数据失败，已回退到本地数据', error);
     setTimeout(() => reportCloudStatus(
       'error',
       '云端读取失败，当前使用本地数据'
     ), 0);
-    return localState;
+    return {
+      state: localState,
+      source: 'local-fallback',
+      configured: true,
+      error
+    };
   }
+}
+
+export async function load() {
+  const localState = loadLocal();
+  const result = await syncCloudState(localState);
+  return result.state;
 }
 
 export const save = state => {

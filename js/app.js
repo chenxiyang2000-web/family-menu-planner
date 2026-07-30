@@ -1,13 +1,17 @@
-import { load, save, uid, createPlan, categories, meals, healthTags, cuisineOptions, servingOptions } from './storage.js';
-import { currentPlan, dayIndexes, getSlot, slotKey, dishOf, eligible, buildSelectedPlan, generateCompletePlan, replaceDish, shoppingSummary } from './logic.js';
+import { loadLocal, syncCloudState, save, uid, createPlan, categories, meals, healthTags, ingredientTags, cuisineOptions, servingOptions } from './storage.js';
+import { currentPlan, dayIndexes, getSlot, slotKey, dishOf, eligible, buildSelectedPlan, completeExistingMenu, menuPreferenceOptions, replaceDish, shoppingSummary } from './logic.js';
 
-let state=await load(), view='library', filter='全部', search='', orderSelection=[], startFolderId=null, startPlanOpen=false;
-let removedLegacyBlanks=false;
-state.plans.forEach(plan=>Object.keys(plan.slots||{}).forEach(key=>{
-  const cleaned=(plan.slots[key]||[]).filter(item=>!item.blank);
-  if(cleaned.length!==(plan.slots[key]||[]).length){plan.slots[key]=cleaned;removedLegacyBlanks=true}
-}));
-if(removedLegacyBlanks)save(state);
+let state=loadLocal(), view='library', filter='全部', search='', orderSelection=[], startFolderId=null, startPlanOpen=false;
+let cloudBootstrapping=true,cloudStartupError='';
+const cleanLegacyBlanks=targetState=>{
+  let changed=false;
+  targetState.plans.forEach(plan=>Object.keys(plan.slots||{}).forEach(key=>{
+    const cleaned=(plan.slots[key]||[]).filter(item=>!item.blank);
+    if(cleaned.length!==(plan.slots[key]||[]).length){plan.slots[key]=cleaned;changed=true}
+  }));
+  return changed;
+};
+let removedLegacyBlanks=cleanLegacyBlanks(state);
 const displayCategories=['全部','肉类','蔬菜','主食','甜品','超大菜','其他'];
 let allPages=Object.fromEntries(displayCategories.map(x=>[x,1])), orderCategory='全部', orderPages=Object.fromEntries(displayCategories.map(x=>[x,1])), listFolderId=null, listMenuIds=new Set(), startHistory=[];
 let folderCreateOpen=false,menuCreateOpen=false,searchTimer=null;
@@ -22,7 +26,12 @@ document.documentElement.style.setProperty('--all-card-image-ratio',`${imageRati
 document.documentElement.style.setProperty('--menu-preview-image-ratio',`${imageRatios.menuPreview.width}/${imageRatios.menuPreview.height}`);
 const app=document.querySelector('#app'), dishDialog=document.querySelector('#dish-dialog'), slotDialog=document.querySelector('#slot-dialog');
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const dish=id=>state.dishes.find(x=>x.id===id), plan=()=>currentPlan(state);
+let appDishSource=null,appDishIndex=new Map();
+const dish=id=>{
+  if(appDishSource!==state.dishes){appDishSource=state.dishes;appDishIndex=new Map(state.dishes.map(item=>[item.id,item]))}
+  return appDishIndex.get(id);
+};
+const plan=()=>currentPlan(state);
 const showToast=(message,type='success')=>{
   let region=document.querySelector('#toast-region');
   if(!region){region=document.createElement('div');region.id='toast-region';region.setAttribute('aria-live','polite');document.body.append(region)}
@@ -70,12 +79,14 @@ function libraryCard(d){
   return `<article class="dish-card"><div class="dish-image" ${image}>${d.image?'':esc(d.name.slice(0,1))}</div>
   <button class="favorite" data-action="favorite" data-id="${d.id}">${d.favorite?'♥':'♡'}</button>
   <div class="dish-body"><h2 class="dish-title">${esc(d.name)}</h2><div class="meta">${d.category} · ¥${Number(d.price||0).toFixed(2)}</div>
-  <div class="tags">${d.healthTags.map(t=>`<span class="tag">${t}</span>`).join('')}<span class="tag">${d.servingOptions.map(n=>`${n}人`).join(' / ')}</span></div>
+  <div class="tags">${[...(d.tags||[]),...(d.healthTags||[])].map(t=>`<span class="tag">${t}</span>`).join('')}<span class="tag">${d.servingOptions.map(n=>`${n}人`).join(' / ')}</span></div>
   <div class="meta">食材：${esc(d.ingredients.join('、'))}</div></div>
   <div class="dish-foot"><span><button class="text-btn" data-action="view-dish" data-id="${d.id}">查看详情</button><button class="text-btn" data-action="edit-dish" data-id="${d.id}">编辑</button></span><button class="text-btn" data-action="delete-dish" data-id="${d.id}">删除</button></div></article>`;
 }
 function libraryView(){
-  const shown=state.dishes.filter(d=>(filter==='全部'||displayCategory(d)===filter)&&`${d.name} ${d.ingredients.join(' ')}`.toLowerCase().includes(search.toLowerCase()));
+  const query=search.toLowerCase();
+  const shown=state.dishes.filter(d=>(filter==='全部'||displayCategory(d)===filter)&&
+    `${d.name} ${d.ingredients.join(' ')} ${(d.tags||[]).join(' ')} ${(d.healthTags||[]).join(' ')}`.toLowerCase().includes(query));
   let page=allPages[filter]||1;const paged=pageSlice(shown,page);if(page>paged.pages){page=paged.pages;allPages[filter]=page}
   return `${header('ALL','按肉类、蔬菜、主食、甜品、超大菜和其他分类；每类每页最多 20 道。',`<button class="btn secondary" data-action="export-dishes">导出</button><button class="btn" data-action="add-dish">+ 新增菜品</button>`)}
   <div class="filters"><input class="search" id="dish-search" placeholder="搜索当前分类" value="${esc(search)}">${displayCategories.map(x=>`<button class="filter-btn ${filter===x?'active':''}" data-action="filter" data-filter="${x}">${x}</button>`).join('')}</div>
@@ -103,7 +114,7 @@ function planView(){
     ? `每餐结构：${profile.mealTemplate.dishCount} 道肉类/蔬菜 + 1 份主食 + 1 份甜品或其他；肉菜构成依据“${profile.standard}”比例。${profile.budget?` 预算 ¥${Number(profile.budget).toFixed(2)}，生成预估 ¥${Number(profile.estimatedCost).toFixed(2)}${profile.estimatedCost>profile.budget?'（已尽量压低成本）':''}。`:''}`
     : profile?`规划结构：肉类 ${Math.round(profile.ratios.meat*100)}% · 蔬菜 ${Math.round(profile.ratios.vegetable*100)}% · 主食 ${Math.round(profile.ratios.staple*100)}% · 甜品/其他 ${Math.round(profile.ratios.other*100)}%`:'手动菜单可继续点菜，也可在任意餐次按类别即时添加菜品。';
   return `<div class="breadcrumb"><button data-action="start-root">START</button><span>›</span><button data-action="open-folder" data-id="${p.folderId}">${esc(folder?.name||'文件夹')}</button><span>›</span><b>${esc(p.name)}</b></div>
-  ${header(p.name,`${p.type==='day'?'单日菜单':'周菜单'} · ${p.startDate} · ${p.people} 人`,`${backButton()}<button class="btn secondary" data-action="go-order">选择菜品</button><button class="btn secondary" data-action="organize-plan">整理菜单</button>`)}
+  ${header(p.name,`${p.type==='day'?'单日菜单':'周菜单'} · ${p.startDate} · ${p.people} 人`,`${backButton()}<button class="btn secondary" data-action="go-order">选择菜品</button><button class="btn warm" data-action="open-smart-complete">智能补全菜单</button><button class="btn secondary" data-action="organize-plan">整理菜单</button>`)}
   <section class="hero"><h2>每日菜单</h2><p>${profileText}</p><p>菜单变化后，对应 LIST 会实时同步。</p></section>
   <section class="day-grid menu-days">${dayIndexes(p).map(day=>`<article class="day-card"><div class="day-title"><span>${p.type==='day'?'当天':`第 ${day+1} 天`}</span><small>${dateFor(p.startDate,day)}</small></div>
   ${[...p.meals,'自选'].map(meal=>{const items=getSlot(p,day,meal);if(meal==='自选'&&!items.length)return '';const dropAttrs=meal!=='自选'?`data-drop-day="${day}" data-drop-meal="${meal}"`:'';return `<div class="meal-block ${meal!=='自选'?'meal-drop-zone':''}" ${dropAttrs}><div class="meal-name"><span>${meal}</span><span>${items.filter(i=>!i.blank).length} 道</span></div>
@@ -123,7 +134,7 @@ function orderView(){
   const budget=Number(p.budget)||0,overBudget=budget>0&&selectedTotal>budget;
   const budgetDisplay=`<div class="order-budget ${overBudget?'over-budget':''}"><span>当前预算</span> <b>¥${selectedTotal.toFixed(2)}</b><span>/${budget?`¥${budget.toFixed(2)}`:'未设置'}</span></div>`;
   let page=orderPages[orderCategory]||1;const paged=pageSlice(valid,page);if(page>paged.pages){page=paged.pages;orderPages[orderCategory]=page}
-  return `${header('选择菜品',`正在为“${esc(p.name)}”点菜 · 支持 ${p.people} 人`,`${backButton()}<button class="btn warm" data-action="submit-order" ${orderSelection.length?'':'disabled'}>提交已选 ${orderSelection.length} 道</button>`)}
+  return `${header('选择菜品',`正在为“${esc(p.name)}”点菜 · 支持 ${p.people} 人`,`${backButton()}<button class="btn warm" data-action="submit-order" ${orderSelection.length?'':'disabled'}>提交并整理（${orderSelection.length} 道）</button>`)}
   <div class="notice">菜品由 ALL 实时同步，不在点菜页单独导入或更新。已选内容会在返回时保留。</div>
   <div class="filters order-filter-bar"><div class="order-category-tabs">${displayCategories.map(x=>`<button class="filter-btn ${orderCategory===x?'active':''}" data-action="order-filter" data-filter="${x}">${x}</button>`).join('')}</div>${budgetDisplay}</div>
   <section class="dish-grid">${paged.items.length?paged.items.map(orderCard).join(''):'<div class="empty">当前分类没有支持该人数的菜品。</div>'}</section>${pagination(page,paged.pages,'order')}`;
@@ -136,12 +147,11 @@ function menuCreateForm(folder){
   <div class="field"><label>开始日期</label><input type="date" name="startDate" value="${new Date().toISOString().slice(0,10)}"></div>
   <div class="field"><label>用餐人数</label><select name="people">${servingOptions.map(n=>`<option value="${n}" ${p.people===n?'selected':''}>${n} 人</option>`).join('')}</select></div>
   <div class="field wide"><label>每日餐次</label><div class="check-row">${checks('meals',meals,p.meals)}</div></div>
-  <div class="field"><label>健康标准</label><select name="goal">${['均衡','清淡','高蛋白','低糖'].map(x=>`<option>${x}</option>`).join('')}</select></div>
   <div class="field wide"><label>可接受的最高辣度</label>${spicyChoices('maxSpicy',p.maxSpicy??5)}<small class="meta">选择 0 星仅允许不辣；5 星允许全部辣度。</small></div>
   <div class="field wide"><label>菜系限制（可多选，不选表示不限）</label><div class="check-row">${checks('cuisines',cuisineOptions,p.cuisines||[])}</div></div>
   <div class="field"><label>菜单总预算（元，可选）</label><input type="number" name="budget" min="0" step="1" placeholder="例如：500"></div>
   <div class="field"><label>忌口</label><input name="dislike" placeholder="例如：香菜，牛肉"></div></div>
-  <div class="actions"><button class="btn" type="submit" name="intent" value="order">创建并选择菜品</button><button class="btn warm" type="submit" name="intent" value="generate">创建并智能生成</button></div></form></section>`;
+  <div class="actions"><button class="btn" type="submit" name="intent" value="order">创建并选择菜品</button><button class="btn secondary" type="submit" name="intent" value="blank">创建空白菜单</button></div></form></section>`;
 }
 function startView(){
   if(startPlanOpen)return planView();
@@ -190,16 +200,41 @@ function shoppingView(){
 }
 function render(){
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
-  app.innerHTML=view==='library'?libraryView():view==='start'?startView():view==='order'?orderView():shoppingView();
+  const syncStatus=cloudBootstrapping
+    ? '<div class="cloud-startup-status" role="status"><b>本地菜单已显示</b><span>正在校准云端最新数据，完成前暂不可编辑。</span></div>'
+    : cloudStartupError
+      ? `<div class="cloud-startup-status error"><b>当前使用本地数据</b><span>${esc(cloudStartupError)}</span><button class="text-btn" data-action="retry-cloud-startup">重新连接</button></div>`
+      : '';
+  app.innerHTML=syncStatus+(view==='library'?libraryView():view==='start'?startView():view==='order'?orderView():shoppingView());
+}
+
+async function hydrateFromCloud(){
+  if(cloudBootstrapping!==true)cloudBootstrapping=true;
+  cloudStartupError='';
+  render();
+  try{
+    const result=await syncCloudState(state);
+    state=result.state;
+    removedLegacyBlanks=cleanLegacyBlanks(state);
+    cloudStartupError=result.error?'云端连接失败，修改将先保存在本机，恢复连接后再同步。':'';
+    if(removedLegacyBlanks&&!result.error)save(state);
+  }catch(error){
+    console.error('应用启动校准失败',error);
+    cloudStartupError='云端校准失败，已安全保留本地菜单。可稍后重新连接。';
+  }finally{
+    cloudBootstrapping=false;
+    render();
+  }
 }
 
 function openDish(source){
-  const editing=Boolean(source),d=source||{name:'',category:'肉菜',ingredients:[],healthTags:[],cuisine:'中餐',meals:['午餐','晚餐'],servingOptions:[4],favorite:false,image:'',price:0,spicyLevel:0};
+  const editing=Boolean(source),d=source||{name:'',category:'肉菜',ingredients:[],tags:[],healthTags:[],cuisine:'中餐',meals:['午餐','晚餐'],servingOptions:[4],favorite:false,image:'',price:0,spicyLevel:0};
   dishDialog.innerHTML=`<form class="modal-inner" id="dish-form"><h2>${editing?'编辑菜品':'新增菜品'}</h2><div class="form-grid">
   <div class="field"><label>菜名</label><input required name="name" value="${esc(d.name)}"></div><div class="field"><label>分类</label><select name="category">${categories.map(c=>`<option ${d.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
   <div class="field"><label>价格（元）</label><input required type="number" name="price" min="0" step="0.01" value="${Number(d.price||0)}"></div>
   <div class="field wide"><label>辣度</label>${spicyChoices('spicyLevel',d.spicyLevel||0)}</div>
   <div class="field wide"><label>主要食材（仅作为菜品资料）</label><input name="ingredients" value="${esc(d.ingredients.join(','))}"></div>
+  <div class="field wide"><label>食材分类</label><div class="check-row">${checks('tags',ingredientTags,d.tags||[])}</div></div>
   <div class="field wide"><label>健康标签（固定选项，可多选）</label><div class="check-row">${checks('healthTags',healthTags,d.healthTags)}</div></div>
   <div class="field wide"><label>菜系分类（固定选项）</label><div class="check-row">${checks('cuisine',cuisineOptions,[d.cuisine],'','radio')}</div></div>
   <div class="field wide"><label>适用人数（固定选项，可多选）</label><div class="check-row">${checks('servingOptions',servingOptions,d.servingOptions.map(Number),'人')}</div></div>
@@ -232,7 +267,7 @@ function openDish(source){
       try{
         const image=croppedImage||d.image||'';
         const spicyLevel=Number(form.querySelector('.star-picker[data-name="spicyLevel"]')?.dataset.value||0);
-        const next={...d,id:editing?d.id:uid('dish'),name:fd.get('name').trim(),category:fd.get('category'),price:Math.max(0,Number(fd.get('price'))||0),spicyLevel:Math.max(0,Math.min(5,spicyLevel)),ingredients:splitList(fd.get('ingredients')),healthTags:fd.getAll('healthTags'),cuisine:fd.get('cuisine')||'其他',meals:selectedMeals,servingOptions:people,favorite:Boolean(d.favorite),image};
+        const next={...d,id:editing?d.id:uid('dish'),name:fd.get('name').trim(),category:fd.get('category'),price:Math.max(0,Number(fd.get('price'))||0),spicyLevel:Math.max(0,Math.min(5,spicyLevel)),ingredients:splitList(fd.get('ingredients')),tags:fd.getAll('tags'),healthTags:fd.getAll('healthTags'),cuisine:fd.get('cuisine')||'其他',meals:selectedMeals,servingOptions:people,favorite:Boolean(d.favorite),image};
         const previous=state.dishes;
         state.dishes=editing?state.dishes.map(x=>x.id===d.id?next:x):[next,...state.dishes];
         if(!save(state)){state.dishes=previous;return showToast('保存失败：本地存储空间不足，请换用更小的图片。','error')}
@@ -266,6 +301,7 @@ function openDishDetail(d){
         <div class="detail-section"><h3>辣度</h3><p class="detail-spicy" aria-label="${Number(d.spicyLevel||0)} 星辣度">${spicyStars(d.spicyLevel||0)}</p></div>
         ${Number.isFinite(Number(d.price))?`<div class="detail-section"><h3>参考价格</h3><p class="detail-price">¥${Number(d.price||0).toFixed(2)}</p></div>`:''}
         ${d.meals?.length?`<div class="detail-section"><h3>适合餐次</h3>${tags(d.meals)}</div>`:''}
+        ${d.tags?.length?`<div class="detail-section"><h3>食材分类</h3>${tags(d.tags)}</div>`:''}
         ${d.healthTags?.length?`<div class="detail-section"><h3>已有标签</h3>${tags(d.healthTags)}</div>`:''}
       </section>
       ${d.ingredients?.length?`<section class="detail-section detail-wide"><h3>主要食材</h3><p>${d.ingredients.map(esc).join('、')}</p></section>`:''}
@@ -303,15 +339,22 @@ function openGeneratedDish(day,meal){
     persist('菜品已生成并加入菜单。');
   });
 }
-function openAutoFillChoice(){
-  const p=plan();
-  slotDialog.innerHTML=`<section class="modal-inner"><h2>是否自动补全菜单？</h2>
-  <p>是否根据所选饮食风格自动补全菜单？系统会结合健康标准、人数、菜系限制和最高辣度补足菜品。</p>
-  <div class="choice-cards"><button class="choice-card" data-action="confirm-autofill" data-value="true"><b>是，自动补全</b><small>保留已选菜品，并按菜单结构补足缺少的类别。</small></button>
-  <button class="choice-card" data-action="confirm-autofill" data-value="false"><b>否，只使用已选菜品</b><small>不会自动加入任何新菜品。</small></button></div>
-  <div class="modal-actions"><button class="btn secondary" data-action="close-dialog">返回继续选择</button></div></section>`;
-  slotDialog.showModal();
+function openSmartComplete(){
+  const healthDefault=plan()?.goal==='高蛋白'?'高蛋白':plan()?.goal==='清淡'?'少油少盐':'均衡营养';
+  slotDialog.innerHTML=`<form class="modal-inner smart-complete-form" id="smart-complete-form">
+    <h2>智能补全菜单</h2>
+    <p class="meta">补全会保留全部已有菜品，先分析结构，再只补充缺少的内容。</p>
+    <div class="form-grid">
+      <div class="field"><label>健康方向</label><select name="health">${menuPreferenceOptions.health.map(value=>`<option ${value===healthDefault?'selected':''}>${value}</option>`).join('')}</select></div>
+      <div class="field"><label>人群方向</label><select name="audience">${menuPreferenceOptions.audience.map(value=>`<option>${value}</option>`).join('')}</select></div>
+      <div class="field"><label>场景方向</label><select name="scene">${menuPreferenceOptions.scene.map(value=>`<option>${value}</option>`).join('')}</select></div>
+    </div>
+    <div class="notice">老人和儿童仅作为本次菜单规划规则，不会写入菜品标签。</div>
+    <div class="modal-actions"><button class="btn secondary" type="button" data-action="close-dialog">取消</button><button class="btn warm" type="button" data-action="run-smart-complete">确认并智能补全</button></div>
+  </form>`;
+  if(!slotDialog.open)slotDialog.showModal();
 }
+
 const splitList=v=>String(v||'').split(/[，,、]/).map(x=>x.trim()).filter(Boolean);
 const readFileData=file=>new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(r.result);r.onerror=()=>no(new Error('无法读取图片文件'));r.readAsDataURL(file)});
 const loadImage=src=>new Promise((ok,no)=>{const image=new Image();image.onload=()=>ok(image);image.onerror=()=>no(new Error('图片格式无法解析'));image.src=src});
@@ -367,6 +410,11 @@ function download(name,text){const a=document.createElement('a');a.href=URL.crea
 document.addEventListener('click',async e=>{
   const el=e.target.closest('[data-action],[data-view]');if(!el)return;if(el.dataset.view){view=el.dataset.view;if(view==='start'){startFolderId=null;startPlanOpen=false;folderCreateOpen=false;menuCreateOpen=false;startHistory=[]}if(view==='shopping'){listFolderId=null;listMenuIds=new Set()}render();return}
   const {action,id,meal}=el.dataset,day=Number(el.dataset.day),index=Number(el.dataset.index),p=plan();
+  if(action==='retry-cloud-startup'){cloudBootstrapping=true;hydrateFromCloud();return}
+  const startupSafeActions=new Set(['filter','order-filter','page-prev','page-next','page-set','view-dish','close-dialog']);
+  if(cloudBootstrapping&&!startupSafeActions.has(action)){
+    showToast('正在校准云端最新数据，请稍候再编辑。','error');return;
+  }
   if(operationBusy&&action!=='close-dialog')return;
   if(action==='add-dish')openDish();if(action==='view-dish')openDishDetail(dish(id));if(action==='edit-dish')openDish(dish(id));if(action==='close-dialog')el.closest('dialog')?.close();
   if(action==='set-spicy'){
@@ -396,14 +444,26 @@ document.addEventListener('click',async e=>{
   if(action==='toggle-create-menu'){rememberStart();menuCreateOpen=true;render()}
   if(action==='go-order'){rememberStart();orderCategory='全部';view='order';render()}if(action==='select-order'){orderSelection.push(id);render()}
   if(action==='unselect-order'){const i=orderSelection.lastIndexOf(id);if(i>=0)orderSelection.splice(i,1);render()}
-  if(action==='submit-order')openAutoFillChoice();
-  if(action==='confirm-autofill'){
-    await runBusy(el,'正在生成...',async()=>{
-      const previousSlots=p.slots,previousAutoFill=p.autoFillMenu;
-      p.autoFillMenu=el.dataset.value==='true';
-      p.slots=buildSelectedPlan(state,p,orderSelection,p.autoFillMenu);
-      if(!save(state)){p.slots=previousSlots;p.autoFillMenu=previousAutoFill;return showToast('菜单保存失败，请释放本地存储空间后重试。','error')}
-      orderSelection=[];slotDialog.close();view='start';startPlanOpen=true;render();showToast(p.autoFillMenu?'菜单补全成功。':'已按自选菜品生成菜单。')
+  if(action==='submit-order'){
+    await runBusy(el,'正在整理...',async()=>{
+      const previousSlots=p.slots;
+      p.slots=buildSelectedPlan(state,p,orderSelection,false);
+      p.autoFillMenu=false;
+      if(!save(state)){p.slots=previousSlots;return showToast('菜单保存失败，请释放本地存储空间后重试。','error')}
+      orderSelection=[];view='start';startPlanOpen=true;render();showToast('已保留所选菜品，请在菜单整理页继续调整或智能补全。')
+    })
+  }
+  if(action==='open-smart-complete')openSmartComplete();
+  if(action==='run-smart-complete'){
+    const form=el.closest('#smart-complete-form'),fd=new FormData(form);
+    const preferences={health:fd.get('health'),audience:fd.get('audience'),scene:fd.get('scene')};
+    await runBusy(el,'正在补全...',async()=>{
+      const previousSlots=structuredClone(p.slots||{}),previousGoal=p.goal,previousProfile=p.generationProfile;
+      const result=completeExistingMenu(state,p,preferences);
+      p.slots=result.slots;p.autoFillMenu=true;
+      if(!save(state)){p.slots=previousSlots;p.goal=previousGoal;p.generationProfile=previousProfile;return showToast('菜单保存失败，请释放本地存储空间后重试。','error')}
+      slotDialog.close();render();
+      showToast(result.before.missing?`已智能补充 ${result.before.missing} 道菜品。`:'菜单结构已完整，无需补充。')
     })
   }
   if(action==='add-slot')openSingleDish(day,meal);
@@ -421,6 +481,7 @@ document.addEventListener('click',async e=>{
   if(action==='export-dishes')download('菜品库.json',JSON.stringify(state.dishes,null,2));if(action==='print')window.print();
 });
 document.addEventListener('change',e=>{
+  if(cloudBootstrapping){showToast('正在校准云端最新数据，请稍候再编辑。','error');render();return}
   if(e.target.id==='plan-select'){state.currentPlanId=e.target.value;if(!save(state))showToast('当前菜单状态保存失败。','error');render()}
   if(e.target.matches('.item-quantity')){const p=plan(),item=getSlot(p,Number(e.target.dataset.day),e.target.dataset.meal)[Number(e.target.dataset.index)];item.quantity=Math.max(1,Number(e.target.value)||1);persist()}
 });
@@ -431,6 +492,7 @@ document.addEventListener('keydown',e=>{
   e.preventDefault();openCard.click();
 });
 document.addEventListener('dragstart',e=>{
+  if(cloudBootstrapping){e.preventDefault();showToast('正在校准云端最新数据，请稍候再编辑。','error');return}
   const item=e.target.closest('[data-draggable-item]');if(!item)return;
   draggedMenuItem={day:Number(item.dataset.day),meal:item.dataset.meal,index:Number(item.dataset.index)};
   item.classList.add('is-dragging');if(e.dataTransfer)e.dataTransfer.effectAllowed='move';
@@ -451,17 +513,18 @@ document.addEventListener('drop',e=>{
 });
 document.addEventListener('dragend',()=>{draggedMenuItem=null;document.querySelectorAll('.drag-over,.is-dragging').forEach(el=>el.classList.remove('drag-over','is-dragging'))});
 document.addEventListener('submit',async e=>{
+  if(cloudBootstrapping){e.preventDefault();showToast('正在校准云端最新数据，请稍候再编辑。','error');return}
   if(e.target.id==='folder-create-form'){e.preventDefault();if(operationBusy)return;const fd=new FormData(e.target),name=fd.get('name').trim();if(!name)return;const folder={id:uid('folder'),name,createdAt:new Date().toISOString()},previous=[...state.folders];state.folders.push(folder);if(!save(state)){state.folders=previous;return showToast('文件夹保存失败，请重试。','error')}folderCreateOpen=false;startFolderId=folder.id;startPlanOpen=false;menuCreateOpen=false;view='start';render();showToast('文件夹创建成功。');return}
   if(e.target.id!=='new-plan-form')return;e.preventDefault();if(operationBusy)return;const form=e.target,fd=new FormData(form),selectedMeals=fd.getAll('meals');if(!selectedMeals.length)return showToast('请至少选择一个餐次。','error');
-  const type=fd.get('type'),next=createPlan({name:fd.get('name').trim(),type,days:type==='day'?1:7,people:Number(fd.get('people')),goal:fd.get('goal'),selectedMeals});next.folderId=form.dataset.folderId;next.startDate=fd.get('startDate');next.dislike=fd.get('dislike');next.budget=Number(fd.get('budget'))||'';next.maxSpicy=Math.max(0,Math.min(5,Number(form.querySelector('.star-picker[data-name="maxSpicy"]')?.dataset.value||0)));next.cuisines=fd.getAll('cuisines');
+  const type=fd.get('type'),next=createPlan({name:fd.get('name').trim(),type,days:type==='day'?1:7,people:Number(fd.get('people')),goal:'均衡',selectedMeals});next.folderId=form.dataset.folderId;next.startDate=fd.get('startDate');next.dislike=fd.get('dislike');next.budget=Number(fd.get('budget'))||'';next.maxSpicy=Math.max(0,Math.min(5,Number(form.querySelector('.star-picker[data-name="maxSpicy"]')?.dataset.value||0)));next.cuisines=fd.getAll('cuisines');
   const intent=e.submitter?.value||'order';
-  await runBusy(e.submitter,intent==='generate'?'正在生成...':'正在创建...',async()=>{
-    if(intent==='generate'){next.autoFillMenu=true;next.slots=generateCompletePlan(state,next)}
+  await runBusy(e.submitter,'正在创建...',async()=>{
     const previousPlans=state.plans,previousCurrent=state.currentPlanId;
     state.plans=[...state.plans,next];state.currentPlanId=next.id;
     if(!save(state)){state.plans=previousPlans;state.currentPlanId=previousCurrent;return showToast('菜单保存失败，请释放本地存储空间后重试。','error')}
-    orderSelection=[];startFolderId=next.folderId;startPlanOpen=intent==='generate';if(intent==='order')startHistory.push({startFolderId:next.folderId,startPlanOpen:true,view:'start'});view=intent==='generate'?'start':'order';render();showToast(intent==='generate'?'菜单生成成功。':'菜单创建成功，请选择菜品。')
+    orderSelection=[];startFolderId=next.folderId;startPlanOpen=intent==='blank';if(intent==='order')startHistory.push({startFolderId:next.folderId,startPlanOpen:true,view:'start'});view=intent==='blank'?'start':'order';render();showToast(intent==='blank'?'空白菜单已创建，可手动添加或智能补全。':'菜单创建成功，请选择菜品。')
   });
 });
 document.querySelector('#export-data').addEventListener('click',()=>download('家庭菜单完整备份.json',JSON.stringify(state,null,2)));
 render();
+hydrateFromCloud();
