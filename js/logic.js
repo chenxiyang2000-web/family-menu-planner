@@ -17,13 +17,11 @@ function ensureDishIndexes(state) {
     candidateIndex = new Map();
     state.dishes.forEach(dish => {
       (dish.meals || []).forEach(meal => {
-        (dish.servingOptions || []).map(Number).forEach(people => {
-          for (const category of ['', dish.category]) {
-            const key = `${people}|${meal}|${category}`;
-            if (!candidateIndex.has(key)) candidateIndex.set(key, []);
-            candidateIndex.get(key).push(dish);
-          }
-        });
+        for (const category of ['', dish.category]) {
+          const key = `${meal}|${category}`;
+          if (!candidateIndex.has(key)) candidateIndex.set(key, []);
+          candidateIndex.get(key).push(dish);
+        }
       });
     });
   }
@@ -35,6 +33,10 @@ export const dishOf = (state, item) => {
 export const currentPlan = state => state.plans.find(p => p.id === state.currentPlanId) || state.plans[0];
 export const isNoodleStaple = dish =>
   dish?.category === '主食' && String(dish.name || '').trim().endsWith('面');
+export const isMainOnlyStaple = dish => dish?.category === '主食' && Boolean(dish.mainOnly);
+const dishCuisines = dish => Array.isArray(dish?.cuisine)
+  ? dish.cuisine
+  : (dish?.cuisine ? [dish.cuisine] : []);
 export const isSeafood = dish => {
   const searchable = `${dish?.name || ''} ${(dish?.ingredients || []).join(' ')}`;
   return dish?.tags?.includes('海鲜') || /海鲜|鱼|虾|蟹|贝|蛤|蚝|鱿|章鱼|鲍/.test(searchable);
@@ -64,14 +66,13 @@ export function normalizePreferences(preferences = {}) {
 }
 
 const CATEGORY_ORDER = ['肉菜', '蔬菜', '主食', '甜品', '汤饮', '其他'];
-const OTHER_CATEGORIES = new Set(['甜品', '汤饮', '其他']);
-
 function bucketOf(dish) {
   if (!dish) return '';
   if (dish.category === '肉菜') return 'meat';
   if (dish.category === '蔬菜') return 'vegetable';
   if (dish.category === '主食') return 'staple';
-  if (OTHER_CATEGORIES.has(dish.category)) return 'other';
+  if (dish.category === '甜品') return 'dessert';
+  if (dish.category === '汤饮' || dish.category === '其他') return 'other';
   return '';
 }
 
@@ -84,39 +85,45 @@ export function getMealTarget(plan, meal, preferences = {}) {
       ? '清淡'
       : '均衡';
   const ratios = healthStandards[ratioKey] || healthStandards['均衡'];
-  const sideCount = meal === '早餐'
-    ? Math.min(Math.max(people - 1, 0), 4)
-    : (people <= 2 ? 2 : people + 1);
+  const mainCount = meal === '早餐'
+    ? (people < 4 ? people : 5)
+    : (people <= 3 ? people : people <= 6 ? people + 1 : people + 2);
+  const staple = 1;
+  const sideCount = meal === '早餐' ? Math.max(0, mainCount - staple) : mainCount;
   const meatVegetableTotal = Number(ratios.meat || 0) + Number(ratios.vegetable || 0) || 1;
-  const meat = sideCount
+  const calculatedMeat = sideCount
     ? Math.max(0, Math.min(sideCount, Math.round(sideCount * Number(ratios.meat || 0) / meatVegetableTotal)))
     : 0;
+  const meat = meal === '早餐' ? Math.min(1, calculatedMeat) : calculatedMeat;
   const vegetable = sideCount - meat;
-  const other = meal === '早餐' ? 0 : 1;
+  const dessert = meal === '早餐' || people <= 6 ? 0 : 1;
+  const other = meal === '早餐' || people <= 3 ? 0 : 1;
   return {
     people,
     meat,
     vegetable,
-    staple: 1,
+    staple,
+    dessert,
     other,
-    total: sideCount + 1 + other
+    total: sideCount + staple + dessert + other,
+    mainCount
   };
 }
 
-export function eligible(state, plan, meal, excluded = new Set(), category = '') {
+export function eligible(state, plan, meal, excluded = new Set(), category = '', options = {}) {
   const dislikes = String(plan.dislike || '').split(/[，、\s]+/).filter(Boolean);
   const cuisines = Array.isArray(plan.cuisines) ? plan.cuisines : [];
   const maxSpicy = Math.max(0, Math.min(5, Number(plan.maxSpicy ?? 5)));
   ensureDishIndexes(state);
-  const base = candidateIndex.get(`${Number(plan.people)}|${meal}|${category}`) || [];
-  const matches = base.filter(d =>
-    (!cuisines.length || cuisines.includes(d.cuisine)) &&
+  const base = candidateIndex.get(`${meal}|${category}`) || [];
+  const matches = base.filter(d => options.manual || (
+    (!cuisines.length || dishCuisines(d).some(value => cuisines.includes(value))) &&
     Number(d.spicyLevel || 0) <= maxSpicy &&
     !dislikes.some(word =>
       String(d.name || '').includes(word) ||
       (Array.isArray(d.ingredients) && d.ingredients.some(i => String(i).includes(word)))
     )
-  );
+  ));
   const fresh = matches.filter(d => !excluded.has(d.id));
   return fresh.length ? fresh : matches;
 }
@@ -171,10 +178,10 @@ function preferenceAdjustment(dish, preferences) {
   if (pref.audience === '儿童友好') {
     value += tags.has('高蛋白') ? 6 : 0;
     value += dish.category === '蔬菜' ? 4 : 0;
-    value += dish.cuisine === '中餐' ? 2 : 0;
+    value += dishCuisines(dish).includes('中餐') ? 2 : 0;
     value -= stimulating || Number(dish.spicyLevel || 0) > 1 ? 12 : 0;
   }
-  if (pref.scene === '日常' && dish.cuisine === '中餐') value += 1.5;
+  if (pref.scene === '日常' && dishCuisines(dish).includes('中餐')) value += 1.5;
   if (pref.scene !== '日常' && dish.favorite) value += 2;
   return value;
 }
@@ -206,13 +213,14 @@ function pickCandidate(
   remainingSlots,
   historyUsage,
   preferences,
-  { allowNoodle = true, previousDayHadNoodle = false } = {}
+  { allowNoodle = true, allowMainOnly = true, previousDayHadNoodle = false } = {}
 ) {
   const mealIds = new Set(mealDishes.map(d => d.id));
   let candidates = strictCandidates(state, plan, meal, category, preferences)
     .filter(d => !mealIds.has(d.id))
     .filter(d => !dayUsed.has(d.id))
-    .filter(d => allowNoodle || !isNoodleStaple(d));
+    .filter(d => allowNoodle || !isNoodleStaple(d))
+    .filter(d => allowMainOnly || !isMainOnlyStaple(d));
   if (!candidates.length) return null;
   const globallyFresh = candidates.filter(d => !used.has(d.id));
   if (globallyFresh.length) candidates = globallyFresh;
@@ -236,7 +244,7 @@ function pickCandidate(
 }
 
 function countsFor(state, items) {
-  const counts = { meat: 0, vegetable: 0, staple: 0, other: 0 };
+  const counts = { meat: 0, vegetable: 0, staple: 0, dessert: 0, other: 0 };
   items.forEach(item => {
     const bucket = bucketOf(dishOf(state, item));
     if (bucket) counts[bucket] += 1;
@@ -268,33 +276,30 @@ export function analyzeMenu(state, plan, preferences = {}, slots = plan.slots ||
       const dishes = items.map(item => dishOf(state, item)).filter(Boolean);
       const target = getMealTarget(plan, meal, pref);
       const counts = countsFor(state, items);
-      const noodleCount = dishes.filter(isNoodleStaple).length;
+      const mainOnlyCount = dishes.filter(isMainOnlyStaple).length;
       const gaps = {
         meat: Math.max(0, target.meat - counts.meat),
         vegetable: Math.max(0, target.vegetable - counts.vegetable),
         staple: Math.max(0, target.staple - counts.staple),
-        other: Math.max(0, target.other - counts.other),
+        dessert: Math.max(0, target.dessert - counts.dessert),
+        other: Math.max(0, target.other - (target.dessert === 0 ? counts.other + counts.dessert : counts.other)),
         soup: 0
       };
+      if (counts.meat + counts.vegetable >= target.meat + target.vegetable) {
+        gaps.meat = 0;
+        gaps.vegetable = 0;
+      }
+      if (mainOnlyCount) Object.keys(gaps).forEach(key => { gaps[key] = 0; });
       const hasSoup = dishes.some(dish => dish.category === '汤饮');
-      if (meal !== '早餐' && !noodleCount && !hasSoup && gaps.other === 0) gaps.soup = 1;
+      if (meal !== '早餐' && !mainOnlyCount && !hasSoup && target.other > 0 && gaps.other === 0) gaps.soup = 1;
       const needed = Object.values(gaps).reduce((sum, value) => sum + value, 0);
       const capacity = Math.max(0, target.total - items.length);
       const mealWarnings = [];
-      if (items.length > target.total) {
-        blockers.push(`第 ${day + 1} 天${meal}已有 ${items.length} 道，超过 ${plan.people} 人建议上限 ${target.total} 道`);
-      }
-      if (needed > capacity && !noodleCount) {
-        blockers.push(`第 ${day + 1} 天${meal}现有分类失衡，保留全部已有菜品后没有足够位置补齐`);
-      }
-      if (noodleCount > 1 || (noodleCount && items.length > 1)) {
-        blockers.push(`第 ${day + 1} 天${meal}的面类主食需要单独成餐`);
-      }
-      if (items.length && counts.vegetable === 0 && !noodleCount) mealWarnings.push('缺少蔬菜');
-      if (meal !== '早餐' && items.length && !hasSoup && !noodleCount) {
+      if (items.length && counts.vegetable === 0 && !mainOnlyCount) mealWarnings.push('缺少蔬菜');
+      if (meal !== '早餐' && items.length && !hasSoup && !mainOnlyCount) {
         mealWarnings.push('缺少汤饮');
       }
-      if (items.length && counts.staple === 0 && !noodleCount) mealWarnings.push('缺少主食');
+      if (items.length && counts.staple === 0 && !mainOnlyCount) mealWarnings.push('缺少主食');
       if (dishes.length && dishes.filter(isFriedOrHeavy).length / dishes.length >= 0.5) mealWarnings.push('油炸或重口味比例偏高');
       meals.push({ day, meal, key, current: items.length, target, counts, gaps, capacity, warnings: mealWarnings });
 
@@ -348,64 +353,32 @@ export function completeExistingMenu(state, plan, preferences = {}) {
   }
 }
 
-function validateDishForPlan(state, plan, dish, meal) {
-  return dish &&
-    dish.category !== '超大菜' &&
-    strictCandidates(state, plan, meal, dish.category).some(item => item.id === dish.id);
-}
-
 export function distributeSelected(state, plan, selectedIds) {
   const slots = structuredClone(plan.slots || {});
   const targets = dayIndexes(plan).flatMap(day =>
     plan.meals.map(meal => ({ day, meal, key: slotKey(day, meal), target: getMealTarget(plan, meal) }))
   );
-  const selectedDayUses = new Map();
-  targets.forEach(target => (slots[target.key] || []).forEach(item => {
-    if (!item?.dishId) return;
-    if (!selectedDayUses.has(item.dishId)) selectedDayUses.set(item.dishId, new Set());
-    selectedDayUses.get(item.dishId).add(target.day);
-  }));
 
   for (const dishId of selectedIds) {
-    const dish = state.dishes.find(item => item.id === dishId);
+    const dish = dishOf(state, { dishId });
     if (!dish) throw new Error('已选菜品不存在，请刷新菜品库后重试。');
-    const priorDays = selectedDayUses.get(dishId) || new Set();
     const candidates = targets
-      .filter(item => validateDishForPlan(state, plan, dish, item.meal))
-      .filter(item => !priorDays.has(item.day))
-      .filter(item => {
-        const existing = slots[item.key] || [];
-        const hasNoodle = existing.some(entry => isNoodleStaple(dishOf(state, entry)));
-        if (isNoodleStaple(dish)) {
-          const dayHasNoodle = targets
-            .filter(target => target.day === item.day)
-            .some(target => (slots[target.key] || []).some(entry => isNoodleStaple(dishOf(state, entry))));
-          return existing.length === 0 && !dayHasNoodle;
-        }
-        if (hasNoodle) return false;
-        const bucket = bucketOf(dish);
-        return bucket && existing.length < item.target.total;
-      })
       .sort((a, b) => {
         const aItems = slots[a.key] || [];
         const bItems = slots[b.key] || [];
         const bucket = bucketOf(dish);
-        const aDeficit = a.target[bucket] - countsFor(state, aItems)[bucket];
-        const bDeficit = b.target[bucket] - countsFor(state, bItems)[bucket];
+        const aDeficit = bucket ? (a.target[bucket] || 0) - (countsFor(state, aItems)[bucket] || 0) : 0;
+        const bDeficit = bucket ? (b.target[bucket] || 0) - (countsFor(state, bItems)[bucket] || 0) : 0;
         return bDeficit - aDeficit || aItems.length - bItems.length || a.day - b.day;
       });
     const destination = candidates[0];
-    if (!destination) {
-      throw new Error(`已选菜品“${dish.name}”无法在不重复且不超出餐次规则的前提下安排，请减少该类菜品或增加菜单天数。`);
-    }
+    if (!destination) throw new Error('当前菜单没有可安排的餐次。');
     slots[destination.key] = [...(slots[destination.key] || []), {
       dishId,
       quantity: dish.category === '主食' ? Number(plan.people) : 1,
       servings: Number(plan.people),
       locked: false
     }];
-    priorDays.add(destination.day);
-    selectedDayUses.set(dishId, priorDays);
   }
   return slots;
 }
@@ -430,7 +403,7 @@ export function generateCompletePlan(state, plan, options = {}) {
   let remainingSlots = totalPlannedSlots;
   let estimatedCost = 0;
   let previousDayHadNoodle = history.previousDayHadNoodle;
-  const generatedCounts = { meat: 0, vegetable: 0, staple: 0, other: 0 };
+  const generatedCounts = { meat: 0, vegetable: 0, staple: 0, dessert: 0, other: 0 };
 
   const fail = (meal, detail) => {
     throw new Error(`${meal}无法生成完整菜单：${detail}。请补充符合人数、餐次、菜系和辣度条件的菜品后重试。`);
@@ -446,7 +419,6 @@ export function generateCompletePlan(state, plan, options = {}) {
       plan.meals.flatMap(meal => (seedSlots[slotKey(day, meal)] || []).map(item => item.dishId))
     );
     const dayUsed = new Set(reservedForDay);
-    const seenSeedIds = new Set();
     let dayHasNoodle = false;
     for (const meal of plan.meals) {
       const key = slotKey(day, meal);
@@ -456,27 +428,23 @@ export function generateCompletePlan(state, plan, options = {}) {
 
       for (const item of items) {
         const dish = dishOf(state, item);
-        if (!validateDishForPlan(state, plan, dish, meal)) fail(meal, `已选菜品“${dish?.name || '未知菜品'}”不符合当前筛选条件`);
-        if (seenSeedIds.has(dish.id)) fail(meal, `同一天重复选择了“${dish.name}”`);
+        if (!dish) fail(meal, '已有菜单中存在已删除的菜品');
         item.quantity = dish.category === '主食' ? people : Number(item.quantity || 1);
         item.servings = people;
-        seenSeedIds.add(dish.id);
         used.add(dish.id);
         mealDishes.push(dish);
+        if (isNoodleStaple(dish)) dayHasNoodle = true;
         estimatedCost += Number(dish.price || 0) * Number(item.quantity || 1);
         if (Number.isFinite(remainingBudget)) remainingBudget -= Number(dish.price || 0) * Number(item.quantity || 1);
         remainingSlots = Math.max(0, remainingSlots - 1);
       }
 
-      const seededNoodles = mealDishes.filter(isNoodleStaple);
-      if (seededNoodles.length) {
-        if (seededNoodles.length > 1 || items.length > 1 || dayHasNoodle) fail(meal, '面类主食必须单独成餐，且同一天最多出现一次');
-        dayHasNoodle = true;
+      const seededMainOnly = mealDishes.filter(isMainOnlyStaple);
+      if (seededMainOnly.length) {
+        if (seededMainOnly.some(isNoodleStaple)) dayHasNoodle = true;
         slots[key] = items;
         continue;
       }
-
-      if (items.length > target.total) fail(meal, `已有 ${items.length} 道，超过当前人数建议上限 ${target.total} 道`);
 
       const add = (category, quantity = 1, pickOptions = {}) => {
         const selected = pickCandidate(
@@ -500,27 +468,42 @@ export function generateCompletePlan(state, plan, options = {}) {
       let counts = countsFor(state, items);
       if (counts.staple < target.staple) {
         const staple = add('主食', people, {
-          allowNoodle: items.length === 0 && !dayHasNoodle,
+          allowNoodle: !dayHasNoodle,
+          allowMainOnly: items.length === 0,
           previousDayHadNoodle
         });
         if (!staple) fail(meal, '没有可用主食');
-        if (isNoodleStaple(dishOf(state, staple))) {
-          dayHasNoodle = true;
+        if (isMainOnlyStaple(dishOf(state, staple))) {
+          if (isNoodleStaple(dishOf(state, staple))) dayHasNoodle = true;
           slots[key] = [staple];
           continue;
         }
       }
 
       counts = countsFor(state, items);
-      while (counts.meat < target.meat) {
-        if (!add('肉菜')) fail(meal, `肉菜候选不足，目标 ${target.meat} 道`);
+      const sideTarget = target.meat + target.vegetable;
+      if (counts.meat + counts.vegetable < sideTarget) {
+        while (counts.meat < target.meat && counts.meat + counts.vegetable < sideTarget) {
+          if (!add('肉菜')) fail(meal, `肉菜候选不足，目标 ${target.meat} 道`);
+          counts = countsFor(state, items);
+        }
+        while (counts.vegetable < target.vegetable && counts.meat + counts.vegetable < sideTarget) {
+          if (!add('蔬菜')) fail(meal, `蔬菜候选不足，目标 ${target.vegetable} 道`);
+          counts = countsFor(state, items);
+        }
+      }
+      while (counts.dessert < target.dessert) {
+        if (!add('甜品')) fail(meal, '没有可用甜品');
         counts = countsFor(state, items);
       }
-      while (counts.vegetable < target.vegetable) {
-        if (!add('蔬菜')) fail(meal, `蔬菜候选不足，目标 ${target.vegetable} 道`);
+      const flexibleOtherCount = () => target.dessert === 0
+        ? counts.other + counts.dessert
+        : counts.other;
+      if (meal !== '早餐' && target.other > 0 && !mealDishes.some(dish => dish.category === '汤饮')) {
+        if (!add('汤饮')) fail(meal, '没有可用汤饮');
         counts = countsFor(state, items);
       }
-      while (counts.other < target.other) {
+      while (flexibleOtherCount() < target.other) {
         const order = preferences.health === '少油少盐' ||
           preferences.health === '低脂' ||
           preferences.audience === '老人友好'
@@ -536,14 +519,12 @@ export function generateCompletePlan(state, plan, options = {}) {
       }
 
       counts = countsFor(state, items);
-      if (items.length !== target.total ||
-          counts.meat !== target.meat ||
-          counts.vegetable !== target.vegetable ||
-          counts.staple !== target.staple ||
-          counts.other !== target.other) {
+      if (counts.meat + counts.vegetable < sideTarget ||
+          counts.staple < target.staple ||
+          counts.dessert < target.dessert ||
+          flexibleOtherCount() < target.other) {
         fail(meal, '最终数量或分类校验失败');
       }
-      if (new Set(items.map(item => item.dishId)).size !== items.length) fail(meal, '出现重复菜品');
       slots[key] = sortItems(items);
     }
     previousDayHadNoodle = dayHasNoodle;
@@ -555,15 +536,17 @@ export function generateCompletePlan(state, plan, options = {}) {
     ratios: { ...ratios },
     people,
     mealTemplate: {
-      dishCount: people <= 2 ? 2 : people + 1,
+      dishCount: people <= 3 ? people : people <= 6 ? people + 1 : people + 2,
       stapleCount: 1,
       stapleQuantity: people,
-      dessertOrOtherCount: 1
+      dessertCount: people > 6 ? 1 : 0,
+      otherCount: people > 3 ? 1 : 0
     },
     breakfastTemplate: {
       stapleQuantity: people,
-      dishCount: Math.min(Math.max(people - 1, 0), 4),
-      dishLimit: 4
+      dishCount: people < 4 ? people : 5,
+      dishLimit: 5,
+      meatLimit: 1
     },
     generatedCounts,
     totalSlots: Object.values(slots).flat().length,
@@ -585,7 +568,7 @@ export function replaceDish(state, plan, day, meal, index) {
     return !standardCategories.includes(dish.category);
   };
   const candidates = eligible(state, plan, targetMeal, new Set())
-    .filter(d => d.id !== currentDish.id && sameCategory(d));
+    .filter(d => d.id !== currentDish.id && d.category !== '超大菜' && sameCategory(d));
   const fresh = candidates.filter(d => !used.has(d.id));
   const pool = fresh.length ? fresh : candidates;
   const replacement = pool[Math.floor(Math.random() * pool.length)];
@@ -599,7 +582,7 @@ export function shoppingSummary(state, plan) {
   Object.values(plan.slots).flat().filter(item => item.dishId).forEach(item => {
     const d = dishOf(state, item);
     if (!d) return;
-    const existing = map.get(d.id) || { id: d.id, name: d.name, image: d.image, quantity: 0 };
+    const existing = map.get(d.id) || { id: d.id, name: d.name, image: d.image, ingredients:[...(d.ingredients||[])], quantity: 0 };
     existing.quantity += Number(item.quantity || 1);
     map.set(d.id, existing);
   });

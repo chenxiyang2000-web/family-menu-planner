@@ -23,7 +23,8 @@ export const meals = ['早餐', '午餐', '晚餐'];
 export const healthTags = ['低盐', '低油', '低糖', '清淡', '高蛋白'];
 export const ingredientTags = ['海鲜'];
 export const cuisineOptions = ['中餐', '日料', '意大利菜', '法餐', '韩餐', '东南亚菜', '西餐', '其他'];
-export const servingOptions = [1, 2, 4, 8];
+// 人数只属于菜单计划；保留导出名以减少现有调用面的改动。
+export const servingOptions = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 export const healthStandards = {
   '均衡': { meat:0.30, vegetable:0.40, staple:0.25, other:0.05 },
   '清淡': { meat:0.20, vegetable:0.55, staple:0.25, other:0.00 },
@@ -55,9 +56,10 @@ const makeDish = (row, index) => ({
   id: `sample-${index}`, name: row[0], category: row[1],
   ingredients: row[2].split(','), healthTags: row[3].split(',').filter(tag => healthTags.includes(tag)),
   tags: /鱼|虾|蟹|贝|海鲜/.test(`${row[0]} ${row[2]}`) ? ['海鲜'] : [],
-  cuisine: row[4], meals: row[5].split(','),
-  servingOptions: [...servingOptions], favorite: [0,2,6].includes(index),
-  image: '', price: samplePrices[index], spicyLevel: [0,2,0,0,3,4,0,0,1,1,0,0,0,0,0,0][index] || 0
+  cuisine: [row[4]], meals: row[5].split(','),
+  mainOnly: row[1] === '主食' && row[0].endsWith('面'),
+  favorite: [0,2,6].includes(index), image: '', price: samplePrices[index],
+  spicyLevel: [0,2,0,0,3,4,0,0,1,1,0,0,0,0,0,0][index] || 0
 });
 
 export const uid = prefix => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
@@ -90,18 +92,18 @@ function migrateDish(d) {
   const oldTags = Array.isArray(d.healthTags)
     ? d.healthTags
     : rawTags.filter(tag => healthTags.includes(tag));
-  const oldPeople = Array.isArray(d.servingOptions) ? d.servingOptions.map(Number) : servingOptions;
   const sampleIndex = String(d.id || '').startsWith('sample-') ? Number(String(d.id).slice(7)) : -1;
+  const cuisines = Array.isArray(d.cuisine) ? d.cuisine : [d.cuisine];
   return {
     id: d.id || uid('dish'), name: d.name || '未命名菜品',
     category: categories.includes(d.category) ? d.category : '其他',
     ingredients: Array.isArray(d.ingredients) ? d.ingredients : [],
     healthTags: oldTags.filter(tag => healthTags.includes(tag)),
     tags: rawTags.filter(tag => ingredientTags.includes(tag)),
-    cuisine: cuisineOptions.includes(d.cuisine) ? d.cuisine : '中餐',
+    cuisine: cuisines.filter(value => cuisineOptions.includes(value)).length
+      ? [...new Set(cuisines.filter(value => cuisineOptions.includes(value)))] : ['中餐'],
     meals: Array.isArray(d.meals) && d.meals.length ? d.meals.filter(meal => meals.includes(meal)) : ['午餐','晚餐'],
-    servingOptions: oldPeople.filter(n => servingOptions.includes(n)).length
-      ? oldPeople.filter(n => servingOptions.includes(n)) : [...servingOptions],
+    mainOnly: d.category === '主食' && (Boolean(d.mainOnly) || String(d.name || '').trim().endsWith('面')),
     favorite: Boolean(d.favorite), image: d.image || '',
     price: Math.max(0, Number(d.price ?? d.cost ?? samplePrices[sampleIndex] ?? 0) || 0),
     spicyLevel: Math.max(0, Math.min(5, Number(d.spicyLevel)||0)),

@@ -1,7 +1,7 @@
 import { loadLocal, syncCloudState, save, uid, createPlan, categories, meals, healthTags, ingredientTags, cuisineOptions, servingOptions } from './storage.js';
-import { currentPlan, dayIndexes, getSlot, slotKey, dishOf, eligible, buildSelectedPlan, completeExistingMenu, menuPreferenceOptions, replaceDish, shoppingSummary } from './logic.js';
+import { currentPlan, dayIndexes, getSlot, slotKey, dishOf, eligible, buildSelectedPlan, completeExistingMenu, menuPreferenceOptions, replaceDish, shoppingSummary } from './logic.js?v=20260807-2';
 
-let state=loadLocal(), view='library', filter='全部', search='', orderSelection=[], startFolderId=null, startPlanOpen=false;
+let state=loadLocal(), view='library', filter='全部', search='', orderSelection=[], orderTarget=null, startFolderId=null, startPlanOpen=false;
 let cloudBootstrapping=true,cloudStartupError='';
 const cleanLegacyBlanks=targetState=>{
   let changed=false;
@@ -79,7 +79,7 @@ function libraryCard(d){
   return `<article class="dish-card"><div class="dish-image" ${image}>${d.image?'':esc(d.name.slice(0,1))}</div>
   <button class="favorite" data-action="favorite" data-id="${d.id}">${d.favorite?'♥':'♡'}</button>
   <div class="dish-body"><h2 class="dish-title">${esc(d.name)}</h2><div class="meta">${d.category} · ¥${Number(d.price||0).toFixed(2)}</div>
-  <div class="tags">${[...(d.tags||[]),...(d.healthTags||[])].map(t=>`<span class="tag">${t}</span>`).join('')}<span class="tag">${d.servingOptions.map(n=>`${n}人`).join(' / ')}</span></div>
+  <div class="tags">${[...(d.tags||[]),...(d.healthTags||[])].map(t=>`<span class="tag">${t}</span>`).join('')}</div>
   <div class="meta">食材：${esc(d.ingredients.join('、'))}</div></div>
   <div class="dish-foot"><span><button class="text-btn" data-action="view-dish" data-id="${d.id}">查看详情</button><button class="text-btn" data-action="edit-dish" data-id="${d.id}">编辑</button></span><button class="text-btn" data-action="delete-dish" data-id="${d.id}">删除</button></div></article>`;
 }
@@ -111,10 +111,10 @@ function planView(){
   const folder=state.folders.find(x=>x.id===p.folderId);
   const profile=p.generationProfile;
   const profileText=profile?.mealTemplate
-    ? `每餐结构：${profile.mealTemplate.dishCount} 道肉类/蔬菜 + 1 份主食 + 1 份甜品或其他；肉菜构成依据“${profile.standard}”比例。${profile.budget?` 预算 ¥${Number(profile.budget).toFixed(2)}，生成预估 ¥${Number(profile.estimatedCost).toFixed(2)}${profile.estimatedCost>profile.budget?'（已尽量压低成本）':''}。`:''}`
+    ? `午餐/晚餐：${profile.mealTemplate.dishCount} 道主要菜品 + 1 道普通主食${profile.mealTemplate.dessertCount?` + ${profile.mealTemplate.dessertCount} 道甜品`:''}${profile.mealTemplate.otherCount?` + ${profile.mealTemplate.otherCount} 道汤饮/其他`:''}；早餐 ${profile.breakfastTemplate.dishCount} 道、肉类最多 1 道。独立一餐主食除外。${profile.budget?` 预算 ¥${Number(profile.budget).toFixed(2)}，生成预估 ¥${Number(profile.estimatedCost).toFixed(2)}${profile.estimatedCost>profile.budget?'（已尽量压低成本）':''}。`:''}`
     : profile?`规划结构：肉类 ${Math.round(profile.ratios.meat*100)}% · 蔬菜 ${Math.round(profile.ratios.vegetable*100)}% · 主食 ${Math.round(profile.ratios.staple*100)}% · 甜品/其他 ${Math.round(profile.ratios.other*100)}%`:'手动菜单可继续点菜，也可在任意餐次按类别即时添加菜品。';
   return `<div class="breadcrumb"><button data-action="start-root">START</button><span>›</span><button data-action="open-folder" data-id="${p.folderId}">${esc(folder?.name||'文件夹')}</button><span>›</span><b>${esc(p.name)}</b></div>
-  ${header(p.name,`${p.type==='day'?'单日菜单':'周菜单'} · ${p.startDate} · ${p.people} 人`,`${backButton()}<button class="btn secondary" data-action="go-order">选择菜品</button><button class="btn warm" data-action="open-smart-complete">智能补全菜单</button><button class="btn secondary" data-action="organize-plan">整理菜单</button>`)}
+  ${header(p.name,`${p.type==='day'?'单日菜单':'周菜单'} · ${p.startDate} · ${p.people} 人`,`${backButton()}<button class="btn warm" data-action="open-smart-complete">智能补全菜单</button><button class="btn secondary" data-action="organize-plan">整理菜单</button>`)}
   <section class="hero"><h2>每日菜单</h2><p>${profileText}</p><p>菜单变化后，对应 LIST 会实时同步。</p></section>
   <section class="day-grid menu-days">${dayIndexes(p).map(day=>`<article class="day-card"><div class="day-title"><span>${p.type==='day'?'当天':`第 ${day+1} 天`}</span><small>${dateFor(p.startDate,day)}</small></div>
   ${[...p.meals,'自选'].map(meal=>{const items=getSlot(p,day,meal);if(meal==='自选'&&!items.length)return '';const dropAttrs=meal!=='自选'?`data-drop-day="${day}" data-drop-meal="${meal}"`:'';return `<div class="meal-block ${meal!=='自选'?'meal-drop-zone':''}" ${dropAttrs}><div class="meal-name"><span>${meal}</span><span>${items.filter(i=>!i.blank).length} 道</span></div>
@@ -128,13 +128,13 @@ function orderCard(d){
 }
 function orderView(){
   // 点菜页始终直接读取 ALL 使用的 state.dishes，不维护独立菜品副本。
-  const p=plan(),allowedIds=new Set(p.meals.flatMap(meal=>eligible(state,p,meal).map(d=>d.id)));
-  const valid=state.dishes.filter(d=>allowedIds.has(d.id)&&(orderCategory==='全部'||displayCategory(d)===orderCategory));
+  const p=plan();
+  const valid=state.dishes.filter(d=>orderCategory==='全部'||displayCategory(d)===orderCategory);
   const selectedTotal=orderSelection.reduce((sum,id)=>sum+Number(dish(id)?.price||0),0);
   const budget=Number(p.budget)||0,overBudget=budget>0&&selectedTotal>budget;
   const budgetDisplay=`<div class="order-budget ${overBudget?'over-budget':''}"><span>当前预算</span> <b>¥${selectedTotal.toFixed(2)}</b><span>/${budget?`¥${budget.toFixed(2)}`:'未设置'}</span></div>`;
   let page=orderPages[orderCategory]||1;const paged=pageSlice(valid,page);if(page>paged.pages){page=paged.pages;orderPages[orderCategory]=page}
-  return `${header('选择菜品',`正在为“${esc(p.name)}”点菜 · 支持 ${p.people} 人`,`${backButton()}<button class="btn warm" data-action="submit-order" ${orderSelection.length?'':'disabled'}>提交并整理（${orderSelection.length} 道）</button>`)}
+  return `${header('选择菜品',`正在为“${esc(p.name)}”${orderTarget?`的第 ${orderTarget.day+1} 天${esc(orderTarget.meal)}`:''}点菜 · 人工选择不受生成规则限制`,`${backButton()}<button class="btn warm" data-action="submit-order" ${orderSelection.length?'':'disabled'}>提交并整理（${orderSelection.length} 道）</button>`)}
   <div class="notice">菜品由 ALL 实时同步，不在点菜页单独导入或更新。已选内容会在返回时保留。</div>
   <div class="filters order-filter-bar"><div class="order-category-tabs">${displayCategories.map(x=>`<button class="filter-btn ${orderCategory===x?'active':''}" data-action="order-filter" data-filter="${x}">${x}</button>`).join('')}</div>${budgetDisplay}</div>
   <section class="dish-grid">${paged.items.length?paged.items.map(orderCard).join(''):'<div class="empty">当前分类没有支持该人数的菜品。</div>'}</section>${pagination(page,paged.pages,'order')}`;
@@ -195,7 +195,7 @@ function shoppingView(){
     <div class="cost-summary"><div><span>总预算</span><b>${totalBudget?`¥${totalBudget.toFixed(2)}`:'未设置'}</b></div><div><span>实际总价</span><b>¥${actualTotal.toFixed(2)}</b></div><div class="${totalOver>0?'cost-over':''}"><span>超出</span><b>¥${totalOver.toFixed(2)}</b></div></div>
     <div class="menu-cost-breakdown">${details.map(x=>`<article><b>${esc(x.menu.name)}</b><span>预算 ${x.budget?`¥${x.budget.toFixed(2)}`:'未设置'}</span><span>实际 ¥${x.actual.toFixed(2)}</span><span class="${x.over>0?'cost-over-text':''}">超出 ¥${x.over.toFixed(2)}</span></article>`).join('')}</div>
     <div class="shopping-heading"><h3>采购清单</h3><small>相同菜品已自动合并</small></div>
-    ${items.length?items.map(x=>`<div class="plan-item"><b>${esc(x.name)}</b><span>¥${Number(dish(x.id)?.price||0).toFixed(2)} × ${x.quantity}</span></div>`).join(''):'<div class="empty">所选菜单还没有安排菜品。</div>'}
+    ${items.length?items.map(x=>`<div class="plan-item shopping-item"><div><b>${esc(x.name)}</b>${x.ingredients?.length?`<small class="shopping-ingredients">${x.ingredients.map(esc).join('、')}</small>`:''}</div><span>¥${Number(dish(x.id)?.price||0).toFixed(2)} × ${x.quantity}</span></div>`).join(''):'<div class="empty">所选菜单还没有安排菜品。</div>'}
   </section><p class="footer-note">多选只用于实时查看和汇总，不会修改任何菜单、预算或菜品数据。</p>`:'<div class="empty">请选择至少一个菜单查看预算和采购汇总。</div>'}`;
 }
 function render(){
@@ -228,7 +228,7 @@ async function hydrateFromCloud(){
 }
 
 function openDish(source){
-  const editing=Boolean(source),d=source||{name:'',category:'肉菜',ingredients:[],tags:[],healthTags:[],cuisine:'中餐',meals:['午餐','晚餐'],servingOptions:[4],favorite:false,image:'',price:0,spicyLevel:0};
+  const editing=Boolean(source),d=source||{name:'',category:'肉菜',ingredients:[],tags:[],healthTags:[],cuisine:['中餐'],meals:['午餐','晚餐'],mainOnly:false,favorite:false,image:'',price:0,spicyLevel:0};
   dishDialog.innerHTML=`<form class="modal-inner" id="dish-form"><h2>${editing?'编辑菜品':'新增菜品'}</h2><div class="form-grid">
   <div class="field"><label>菜名</label><input required name="name" value="${esc(d.name)}"></div><div class="field"><label>分类</label><select name="category">${categories.map(c=>`<option ${d.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
   <div class="field"><label>价格（元）</label><input required type="number" name="price" min="0" step="0.01" value="${Number(d.price||0)}"></div>
@@ -236,8 +236,8 @@ function openDish(source){
   <div class="field wide"><label>主要食材（仅作为菜品资料）</label><input name="ingredients" value="${esc(d.ingredients.join(','))}"></div>
   <div class="field wide"><label>食材分类</label><div class="check-row">${checks('tags',ingredientTags,d.tags||[])}</div></div>
   <div class="field wide"><label>健康标签（固定选项，可多选）</label><div class="check-row">${checks('healthTags',healthTags,d.healthTags)}</div></div>
-  <div class="field wide"><label>菜系分类（固定选项）</label><div class="check-row">${checks('cuisine',cuisineOptions,[d.cuisine],'','radio')}</div></div>
-  <div class="field wide"><label>适用人数（固定选项，可多选）</label><div class="check-row">${checks('servingOptions',servingOptions,d.servingOptions.map(Number),'人')}</div></div>
+  <div class="field wide"><label>菜系分类（固定选项，可多选）</label><div class="check-row">${checks('cuisine',cuisineOptions,Array.isArray(d.cuisine)?d.cuisine:[d.cuisine].filter(Boolean))}</div></div>
+  <div class="field wide"><label><input type="checkbox" name="mainOnly" ${d.mainOnly?'checked':''}> 独立一餐主食</label><small>仅对主食生效；启用后，该主食自动生成时会单独组成一餐。</small></div>
   <div class="field wide"><label>适合餐次</label><div class="check-row">${checks('meals',meals,d.meals)}</div></div><div class="field wide"><label>图片</label><input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif"><small class="image-help">选择后需按 ALL 菜品卡片的 3:2 比例裁剪，最终保存为 600 × 400 px。</small><div class="image-upload-preview" ${d.image?`style="background-image:url('${d.image}')"`:''}>${d.image?'':'尚未选择图片'}</div><p class="image-process-status" aria-live="polite"></p></div></div>
   <div class="modal-actions"><button class="btn secondary" type="button" data-action="close-dialog">取消</button><button class="btn" type="submit">保存</button></div></form>`;
   dishDialog.showModal();
@@ -259,15 +259,16 @@ function openDish(source){
   });
   dishForm.addEventListener('submit',async e=>{
     e.preventDefault();
-    const form=e.currentTarget,fd=new FormData(form),people=fd.getAll('servingOptions').map(Number),selectedMeals=fd.getAll('meals');
-    if(!people.length||!selectedMeals.length)return showToast('请至少选择一个适用人数和餐次。','error');
+    const form=e.currentTarget,fd=new FormData(form),selectedMeals=fd.getAll('meals');
+    if(!selectedMeals.length)return showToast('请至少选择一个适合餐次。','error');
     if(imageProcessing)return showToast('图片仍在处理中，请先完成裁剪。','error');
     const submitButton=e.submitter;
     await runBusy(submitButton,croppedImage?'图片上传中...':'正在保存...',async()=>{
       try{
         const image=croppedImage||d.image||'';
         const spicyLevel=Number(form.querySelector('.star-picker[data-name="spicyLevel"]')?.dataset.value||0);
-        const next={...d,id:editing?d.id:uid('dish'),name:fd.get('name').trim(),category:fd.get('category'),price:Math.max(0,Number(fd.get('price'))||0),spicyLevel:Math.max(0,Math.min(5,spicyLevel)),ingredients:splitList(fd.get('ingredients')),tags:fd.getAll('tags'),healthTags:fd.getAll('healthTags'),cuisine:fd.get('cuisine')||'其他',meals:selectedMeals,servingOptions:people,favorite:Boolean(d.favorite),image};
+        const category=fd.get('category');
+        const next={...d,id:editing?d.id:uid('dish'),name:fd.get('name').trim(),category,price:Math.max(0,Number(fd.get('price'))||0),spicyLevel:Math.max(0,Math.min(5,spicyLevel)),ingredients:splitList(fd.get('ingredients')),tags:fd.getAll('tags'),healthTags:fd.getAll('healthTags'),cuisine:fd.getAll('cuisine').length?fd.getAll('cuisine'):['其他'],meals:selectedMeals,mainOnly:category==='主食'&&fd.has('mainOnly'),favorite:Boolean(d.favorite),image};
         const previous=state.dishes;
         state.dishes=editing?state.dishes.map(x=>x.id===d.id?next:x):[next,...state.dishes];
         if(!save(state)){state.dishes=previous;return showToast('保存失败：本地存储空间不足，请换用更小的图片。','error')}
@@ -296,8 +297,8 @@ function openDishDetail(d){
     <div class="detail-content">
       <section class="detail-facts">
         <div class="detail-section"><h3>分类</h3><p class="detail-category">${categoryIcon(d.category)} ${esc(displayCategory(d))}</p></div>
-        ${d.cuisine?`<div class="detail-section"><h3>菜系</h3>${tags([d.cuisine])}</div>`:''}
-        ${d.servingOptions?.length?`<div class="detail-section"><h3>适用人数</h3>${tags(d.servingOptions.map(Number),'人')}</div>`:''}
+        ${d.cuisine?.length?`<div class="detail-section"><h3>菜系</h3>${tags(Array.isArray(d.cuisine)?d.cuisine:[d.cuisine])}</div>`:''}
+        ${d.mainOnly?`<div class="detail-section"><h3>主食规则</h3>${tags(['独立一餐'])}</div>`:''}
         <div class="detail-section"><h3>辣度</h3><p class="detail-spicy" aria-label="${Number(d.spicyLevel||0)} 星辣度">${spicyStars(d.spicyLevel||0)}</p></div>
         ${Number.isFinite(Number(d.price))?`<div class="detail-section"><h3>参考价格</h3><p class="detail-price">¥${Number(d.price||0).toFixed(2)}</p></div>`:''}
         ${d.meals?.length?`<div class="detail-section"><h3>适合餐次</h3>${tags(d.meals)}</div>`:''}
@@ -309,12 +310,6 @@ function openDishDetail(d){
     </div>
   </article>`;
   dishDialog.showModal();
-}
-function openSingleDish(day,meal){
-  const p=plan(),valid=eligible(state,p,meal);
-  slotDialog.innerHTML=`<form class="modal-inner" id="slot-form"><h2>${meal} · 单独点菜</h2><p class="meta">只显示包含 ${p.people} 人标签的菜品。</p><div class="field"><label>菜品</label><select name="dishId">${valid.map(d=>`<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></div>
-  <div class="modal-actions"><button class="btn secondary" type="button" data-action="close-dialog">取消</button><button class="btn" ${valid.length?'':'disabled'}>加入</button></div></form>`;
-  slotDialog.showModal();document.querySelector('#slot-form').addEventListener('submit',e=>{e.preventDefault();const fd=new FormData(e.currentTarget),key=slotKey(day,meal),selected=dish(fd.get('dishId'));p.slots[key]=[...getSlot(p,day,meal),{dishId:fd.get('dishId'),quantity:selected?.category==='主食'?Number(p.people):1,locked:false}];slotDialog.close();persist('菜品已加入菜单。')});
 }
 function openGeneratedDish(day,meal){
   const p=plan();
@@ -439,18 +434,21 @@ document.addEventListener('click',async e=>{
   if(action==='cancel-folder-create'){folderCreateOpen=false;render()}
   if(action==='open-folder'){rememberStart();startFolderId=id;startPlanOpen=false;folderCreateOpen=false;menuCreateOpen=false;view='start';render()}
   if(action==='start-root'){startHistory=[];startFolderId=null;startPlanOpen=false;folderCreateOpen=false;menuCreateOpen=false;view='start';render()}
-  if(action==='start-back'){const previous=startHistory.pop();if(previous){startFolderId=previous.startFolderId;startPlanOpen=previous.startPlanOpen;folderCreateOpen=previous.folderCreateOpen;menuCreateOpen=previous.menuCreateOpen;view=previous.view}else if(menuCreateOpen){menuCreateOpen=false}else if(folderCreateOpen){folderCreateOpen=false}render()}
+  if(action==='start-back'){const leavingOrder=view==='order',previous=startHistory.pop();if(previous){startFolderId=previous.startFolderId;startPlanOpen=previous.startPlanOpen;folderCreateOpen=previous.folderCreateOpen;menuCreateOpen=previous.menuCreateOpen;view=previous.view}else if(menuCreateOpen){menuCreateOpen=false}else if(folderCreateOpen){folderCreateOpen=false}if(leavingOrder)orderTarget=null;render()}
   if(action==='delete-folder'&&confirm('确认删除这个文件夹及其中所有菜单？此操作无法撤销。')){const removedIds=new Set(state.plans.filter(x=>x.folderId===id).map(x=>x.id));state.plans=state.plans.filter(x=>x.folderId!==id);state.folders=state.folders.filter(x=>x.id!==id);if(removedIds.has(state.currentPlanId))state.currentPlanId=state.plans[0]?.id||'';if(listFolderId===id){listFolderId=null;listMenuIds=new Set()}startFolderId=null;startPlanOpen=false;persist('文件夹及关联菜单已删除。')}
   if(action==='toggle-create-menu'){rememberStart();menuCreateOpen=true;render()}
-  if(action==='go-order'){rememberStart();orderCategory='全部';view='order';render()}if(action==='select-order'){orderSelection.push(id);render()}
+  if(action==='go-order'){slotDialog.open&&slotDialog.close();rememberStart();orderTarget=null;orderCategory='全部';view='order';render()}if(action==='select-order'){orderSelection.push(id);render()}
   if(action==='unselect-order'){const i=orderSelection.lastIndexOf(id);if(i>=0)orderSelection.splice(i,1);render()}
   if(action==='submit-order'){
     await runBusy(el,'正在整理...',async()=>{
-      const previousSlots=p.slots;
-      p.slots=buildSelectedPlan(state,p,orderSelection,false);
+      const previousSlots=structuredClone(p.slots||{});
+      if(orderTarget){
+        const key=slotKey(orderTarget.day,orderTarget.meal);
+        p.slots[key]=[...getSlot(p,orderTarget.day,orderTarget.meal),...orderSelection.map(dishId=>{const selected=dish(dishId);return {dishId,quantity:selected?.category==='主食'?Number(p.people):1,servings:Number(p.people),locked:false}})];
+      }else p.slots=buildSelectedPlan(state,p,orderSelection,false);
       p.autoFillMenu=false;
       if(!save(state)){p.slots=previousSlots;return showToast('菜单保存失败，请释放本地存储空间后重试。','error')}
-      orderSelection=[];view='start';startPlanOpen=true;render();showToast('已保留所选菜品，请在菜单整理页继续调整或智能补全。')
+      orderSelection=[];orderTarget=null;view='start';startPlanOpen=true;render();showToast('已保留所选菜品，请在菜单整理页继续调整或智能补全。')
     })
   }
   if(action==='open-smart-complete')openSmartComplete();
@@ -466,12 +464,12 @@ document.addEventListener('click',async e=>{
       showToast(result.before.missing?`已智能补充 ${result.before.missing} 道菜品。`:'菜单结构已完整，无需补充。')
     })
   }
-  if(action==='add-slot')openSingleDish(day,meal);
+  if(action==='add-slot'){rememberStart();orderSelection=[];orderTarget={day,meal};orderCategory='全部';view='order';render()}
   if(action==='generate-dish')openGeneratedDish(day,meal);
   if(action==='organize-plan'){Object.values(p.slots).forEach(items=>items.sort((a,b)=>{if(a.blank)return 1;if(b.blank)return -1;return categoryRank(dishOf(state,a)?.category)-categoryRank(dishOf(state,b)?.category)}));persist('菜单已整理。')}
   if(action==='move-up'||action==='move-down'){const items=p.slots[slotKey(day,meal)]||[],next=action==='move-up'?index-1:index+1;if(next>=0&&next<items.length){[items[index],items[next]]=[items[next],items[index]];persist()}}
   if(action==='remove-item'){p.slots[slotKey(day,meal)].splice(index,1);persist('菜品已从菜单移除。')}if(action==='replace'){if(replaceDish(state,p,day,meal,index))persist('菜品替换成功。');else showToast('没有其他同时符合人数、餐次、菜系、辣度和忌口要求的同类菜品。','error')}
-  if(action==='open-plan'){rememberStart();state.currentPlanId=id;startFolderId=plan().folderId;startPlanOpen=true;orderSelection=[];if(!save(state))showToast('当前菜单状态保存失败。','error');view='start';render()}
+  if(action==='open-plan'){rememberStart();state.currentPlanId=id;startFolderId=plan().folderId;startPlanOpen=true;orderSelection=[];orderTarget=null;if(!save(state))showToast('当前菜单状态保存失败。','error');view='start';render()}
   if(action==='delete-menu'&&state.plans.length>1&&confirm('删除这个菜单？')){state.plans=state.plans.filter(x=>x.id!==id);if(state.currentPlanId===id)state.currentPlanId=state.plans[0].id;persist()}
   if(action==='rename-plan'){const name=prompt('新的计划名称',p.name);if(name?.trim()){p.name=name.trim();persist()}}
   if(action==='delete-plan'&&state.plans.length>1&&confirm(`删除“${p.name}”？`)){state.plans=state.plans.filter(x=>x.id!==p.id);state.currentPlanId=state.plans[0].id;startPlanOpen=false;persist()}
@@ -522,7 +520,7 @@ document.addEventListener('submit',async e=>{
     const previousPlans=state.plans,previousCurrent=state.currentPlanId;
     state.plans=[...state.plans,next];state.currentPlanId=next.id;
     if(!save(state)){state.plans=previousPlans;state.currentPlanId=previousCurrent;return showToast('菜单保存失败，请释放本地存储空间后重试。','error')}
-    orderSelection=[];startFolderId=next.folderId;startPlanOpen=intent==='blank';if(intent==='order')startHistory.push({startFolderId:next.folderId,startPlanOpen:true,view:'start'});view=intent==='blank'?'start':'order';render();showToast(intent==='blank'?'空白菜单已创建，可手动添加或智能补全。':'菜单创建成功，请选择菜品。')
+    orderSelection=[];orderTarget=null;startFolderId=next.folderId;startPlanOpen=intent==='blank';if(intent==='order')startHistory.push({startFolderId:next.folderId,startPlanOpen:true,view:'start'});view=intent==='blank'?'start':'order';render();showToast(intent==='blank'?'空白菜单已创建，可手动添加或智能补全。':'菜单创建成功，请选择菜品。')
   });
 });
 document.querySelector('#export-data').addEventListener('click',()=>download('家庭菜单完整备份.json',JSON.stringify(state,null,2)));
